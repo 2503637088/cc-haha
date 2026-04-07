@@ -330,7 +330,7 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
       open={open}
       onClose={onClose}
       title={mode === 'create' ? 'Add Provider' : 'Edit Provider'}
-      width={600}
+      width={720}
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>

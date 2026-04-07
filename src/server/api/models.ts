@@ -86,10 +86,18 @@ export async function handleModelsApi(
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 async function handleModelsList(): Promise<Response> {
-  const activeProvider = await providerService.getActiveProvider()
+  const { providers, activeId } = await providerService.listProviders()
+  const activeProvider = activeId ? providers.find((p) => p.id === activeId) : null
   if (activeProvider) {
+    // Convert ModelMapping to model list for API compatibility
+    const modelList = [
+      { id: activeProvider.models.main, name: activeProvider.models.main, description: 'Main model', context: '' },
+      ...(activeProvider.models.haiku !== activeProvider.models.main ? [{ id: activeProvider.models.haiku, name: activeProvider.models.haiku, description: 'Haiku model', context: '' }] : []),
+      ...(activeProvider.models.sonnet !== activeProvider.models.main ? [{ id: activeProvider.models.sonnet, name: activeProvider.models.sonnet, description: 'Sonnet model', context: '' }] : []),
+      ...(activeProvider.models.opus !== activeProvider.models.main ? [{ id: activeProvider.models.opus, name: activeProvider.models.opus, description: 'Opus model', context: '' }] : []),
+    ]
     return Response.json({
-      models: activeProvider.models,
+      models: modelList,
       provider: { id: activeProvider.id, name: activeProvider.name },
     })
   }
@@ -103,8 +111,11 @@ async function handleCurrentModel(req: Request): Promise<Response> {
     const contextTier = (settings.modelContext as string) || undefined
 
     // Build the full model list: prefer active provider's models, fall back to defaults
-    const activeProvider = await providerService.getActiveProvider()
-    const availableModels = activeProvider ? activeProvider.models : DEFAULT_MODELS
+    const { providers, activeId } = await providerService.listProviders()
+    const activeProvider = activeId ? providers.find((p) => p.id === activeId) : null
+    const availableModels = activeProvider
+      ? [{ id: activeProvider.models.main, name: activeProvider.models.main, description: 'Main model', context: '' }]
+      : DEFAULT_MODELS
 
     // Reconstruct composite ID for lookup (e.g. 'claude-opus-4-6-20250610:1m')
     const lookupId = contextTier ? `${baseModelId}:${contextTier}` : baseModelId
