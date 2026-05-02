@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 vi.mock('./ProjectFilter', () => ({
@@ -17,6 +17,8 @@ vi.mock('../../i18n', () => ({
       'sidebar.noMatching': 'No matching sessions',
       'sidebar.sessionListFailed': 'Session list failed',
       'common.retry': 'Retry',
+      'common.loading': 'Loading...',
+      'common.cancel': 'Cancel',
       'common.delete': 'Delete',
       'common.rename': 'Rename',
       'sidebar.timeGroup.today': 'Today',
@@ -25,6 +27,7 @@ vi.mock('../../i18n', () => ({
       'sidebar.timeGroup.last30days': 'Last 30 Days',
       'sidebar.timeGroup.older': 'Older',
       'sidebar.missingDir': 'Missing',
+      'sidebar.confirmDelete': 'Delete this session? This cannot be undone.',
       'sidebar.collapse': 'Collapse sidebar',
       'sidebar.expand': 'Expand sidebar',
     }
@@ -121,7 +124,7 @@ describe('Sidebar', () => {
     expect(useTabStore.getState().tabs).toEqual([])
   })
 
-  it('removes the matching tab when deleting a session from the sidebar', async () => {
+  it('requires confirmation before deleting a session from the sidebar', async () => {
     deleteSession.mockResolvedValue(undefined)
     useSessionStore.setState({
       sessions: [
@@ -146,8 +149,15 @@ describe('Sidebar', () => {
 
     fireEvent.contextMenu(screen.getByRole('button', { name: /Open Session/ }))
 
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+
+    expect(deleteSession).not.toHaveBeenCalled()
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toBeInTheDocument()
+    expect(screen.getByText('Delete this session? This cannot be undone.')).toBeInTheDocument()
+
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
     })
 
     await waitFor(() => {
@@ -191,5 +201,14 @@ describe('Sidebar', () => {
     render(<Sidebar />)
 
     expect(screen.getByTestId('sidebar-session-list-section')).toHaveClass('flex', 'flex-1', 'min-h-0', 'flex-col')
+  })
+
+  it('shows a loading state instead of an empty session list while initial fetch is pending', () => {
+    useSessionStore.setState({ isLoading: true, sessions: [] })
+
+    render(<Sidebar />)
+
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    expect(screen.queryByText('No sessions')).not.toBeInTheDocument()
   })
 })

@@ -23,6 +23,9 @@ extracted-natives/
 # E2E screenshots
 e2e-*.png
 
+# Quality gate reports
+artifacts/quality-runs/
+
 # Desktop build output
 desktop/dist/
 desktop/build-artifacts/
@@ -39,6 +42,7 @@ desktop/brand-assets/
 
 # Superpowers plans & specs (local only)
 docs/superpowers/
+.superpowers/
 
 # Temp server/web logs
 .tmp-*.log
@@ -63,3 +67,9 @@ sidebar-snapshot.md
 docs/.vitepress/dist
 docs/.vitepress/cache
 runtime/__pycache__
+
+# IDE
+.idea
+
+# Codex logs
+.codex-logs/

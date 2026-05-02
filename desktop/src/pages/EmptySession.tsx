@@ -3,27 +3,34 @@ import { skillsApi } from '../api/skills'
 import { useTranslation } from '../i18n'
 import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
+import { useProviderStore } from '../stores/providerStore'
+import { useSessionRuntimeStore, DRAFT_RUNTIME_SELECTION_KEY } from '../stores/sessionRuntimeStore'
+import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'
-import { useTabStore } from '../stores/tabStore'
+import { SETTINGS_TAB_ID, useTabStore } from '../stores/tabStore'
+import { OFFICIAL_DEFAULT_MODEL_ID } from '../constants/modelCatalog'
 import { DirectoryPicker } from '../components/shared/DirectoryPicker'
 import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
 import { ModelSelector } from '../components/controls/ModelSelector'
 import { AttachmentGallery } from '../components/chat/AttachmentGallery'
 import { FileSearchMenu, type FileSearchMenuHandle } from '../components/chat/FileSearchMenu'
+import { LocalSlashCommandPanel, type LocalSlashCommandName } from '../components/chat/LocalSlashCommandPanel'
 import {
   FALLBACK_SLASH_COMMANDS,
   findSlashToken,
   insertSlashTrigger,
   mergeSlashCommands,
   replaceSlashCommand,
+  resolveSlashUiAction,
 } from '../components/chat/composerUtils'
-import type { AttachmentRef } from '../types/chat'
+import type { AttachmentRef, UIAttachment } from '../types/chat'
 import type { SlashCommandOption } from '../components/chat/composerUtils'
 
 type Attachment = {
   id: string
   name: string
   type: 'image' | 'file'
+  path?: string
   mimeType?: string
   previewUrl?: string
   data?: string
@@ -33,11 +40,13 @@ export function EmptySession() {
   const t = useTranslation()
   const [input, setInput] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isCreatingSession, setIsCreatingSession] = useState(false)
   const [workDir, setWorkDir] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [fileSearchOpen, setFileSearchOpen] = useState(false)
+  const [localSlashPanel, setLocalSlashPanel] = useState<LocalSlashCommandName | null>(null)
   const [atFilter, setAtFilter] = useState('')
   const [atCursorPos, setAtCursorPos] = useState(-1)
   const [slashFilter, setSlashFilter] = useState('')
@@ -87,6 +96,22 @@ export function EmptySession() {
   }, [slashMenuOpen])
 
   useEffect(() => {
+    if (!localSlashPanel) return
+    const handleClick = (event: MouseEvent) => {
+      if (
+        slashMenuRef.current &&
+        !slashMenuRef.current.contains(event.target as Node) &&
+        textareaRef.current &&
+        !textareaRef.current.contains(event.target as Node)
+      ) {
+        setLocalSlashPanel(null)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [localSlashPanel])
+
+  useEffect(() => {
     if (!fileSearchOpen) return
     const handleClick = (event: MouseEvent) => {
       const menu = document.getElementById('file-search-menu')
@@ -129,15 +154,93 @@ export function EmptySession() {
     }
   }, [workDir])
 
+  const allSlashCommands = useMemo(
+    () => mergeSlashCommands(slashCommands, FALLBACK_SLASH_COMMANDS),
+    [slashCommands],
+  )
+
+  const resolveDraftRuntimeSelection = async () => {
+    const settings = useSettingsStore.getState()
+    let providerState = useProviderStore.getState()
+    if (
+      settings.activeProviderName &&
+      providerState.providers.length === 0 &&
+      !providerState.isLoading
+    ) {
+      await providerState.fetchProviders()
+      providerState = useProviderStore.getState()
+    }
+    const inferredProviderId = providerState.activeId ?? (
+      settings.activeProviderName
+        ? providerState.providers.find((provider) => provider.name === settings.activeProviderName)?.id ?? null
+        : null
+    )
+    return (
+      useSessionRuntimeStore.getState().selections[DRAFT_RUNTIME_SELECTION_KEY]
+      ?? {
+        providerId: inferredProviderId,
+        modelId: settings.currentModel?.id ?? OFFICIAL_DEFAULT_MODEL_ID,
+      }
+    )
+  }
+
+  const openDraftSessionForWorkDir = async (newWorkDir: string) => {
+    setWorkDir(newWorkDir)
+    if (!newWorkDir || isCreatingSession || isSubmitting) return
+
+    setIsCreatingSession(true)
+    try {
+      const draftSelection = await resolveDraftRuntimeSelection()
+      const sessionId = await createSession(newWorkDir)
+      useSessionRuntimeStore.getState().setSelection(sessionId, draftSelection)
+      useSessionRuntimeStore.getState().clearSelection(DRAFT_RUNTIME_SELECTION_KEY)
+      setActiveView('code')
+      useTabStore.getState().openTab(sessionId, 'New Session')
+      connectToSession(sessionId)
+
+      const draftAttachments: UIAttachment[] = attachments.map((attachment) => ({
+        type: attachment.type,
+        name: attachment.name,
+        data: attachment.data,
+        mimeType: attachment.mimeType,
+      }))
+      if (input.trim() || draftAttachments.length > 0) {
+        useChatStore.getState().queueComposerPrefill(sessionId, {
+          text: input,
+          attachments: draftAttachments,
+        })
+      }
+      setInput('')
+      setAttachments([])
+      setFileSearchOpen(false)
+      setSlashMenuOpen(false)
+      setPlusMenuOpen(false)
+      setLocalSlashPanel(null)
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : t('empty.failedToCreate'),
+      })
+    } finally {
+      setIsCreatingSession(false)
+    }
+  }
+
   const filteredCommands = useMemo(() => {
-    const source = mergeSlashCommands(slashCommands, FALLBACK_SLASH_COMMANDS)
+    const source = allSlashCommands
     if (!slashFilter) return source
     const lower = slashFilter.toLowerCase()
     return source.filter((command) => (
       command.name.toLowerCase().includes(lower) ||
       command.description.toLowerCase().includes(lower)
     ))
-  }, [slashCommands, slashFilter])
+  }, [allSlashCommands, slashFilter])
+
+  const exactSlashCommand = useMemo(() => {
+    const normalized = slashFilter.trim().toLowerCase()
+    if (!normalized) return null
+    return filteredCommands.find((command) => command.name.toLowerCase() === normalized) ?? null
+  }, [filteredCommands, slashFilter])
 
   useEffect(() => {
     setSlashSelectedIndex(0)
@@ -145,7 +248,7 @@ export function EmptySession() {
 
   useEffect(() => {
     const activeItem = slashMenuOpen ? slashItemRefs.current[slashSelectedIndex] : null
-    if (typeof activeItem?.scrollIntoView === 'function') {
+    if (activeItem && typeof activeItem.scrollIntoView === 'function') {
       activeItem.scrollIntoView({ block: 'nearest' })
     }
   }, [slashMenuOpen, slashSelectedIndex])
@@ -154,15 +257,39 @@ export function EmptySession() {
     const text = input.trim()
     if ((!text && attachments.length === 0) || isSubmitting) return
 
+    const slashUiAction = text.startsWith('/') ? resolveSlashUiAction(text.slice(1)) : null
+    if (slashUiAction?.type === 'panel') {
+      setLocalSlashPanel(slashUiAction.command as LocalSlashCommandName)
+      setInput('')
+      setSlashMenuOpen(false)
+      setFileSearchOpen(false)
+      setPlusMenuOpen(false)
+      return
+    }
+
+    if (slashUiAction?.type === 'settings') {
+      useUIStore.getState().setPendingSettingsTab(slashUiAction.tab)
+      useTabStore.getState().openTab(SETTINGS_TAB_ID, 'Settings', 'settings')
+      setInput('')
+      setSlashMenuOpen(false)
+      setFileSearchOpen(false)
+      setPlusMenuOpen(false)
+      return
+    }
+
     setIsSubmitting(true)
     try {
+      const draftSelection = await resolveDraftRuntimeSelection()
       const sessionId = await createSession(workDir || undefined)
+      useSessionRuntimeStore.getState().setSelection(sessionId, draftSelection)
+      useSessionRuntimeStore.getState().clearSelection(DRAFT_RUNTIME_SELECTION_KEY)
       setActiveView('code')
       useTabStore.getState().openTab(sessionId, 'New Session')
       connectToSession(sessionId)
       const attachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
         type: attachment.type,
         name: attachment.name,
+        path: attachment.path,
         data: attachment.data,
         mimeType: attachment.mimeType,
       }))
@@ -211,7 +338,7 @@ export function EmptySession() {
       setAtCursorPos(-1)
     } else {
       setAtFilter(textBeforeCursor.slice(pos + 1))
-      setAtCursorPos(cursorPos)
+      setAtCursorPos(pos)
       setSlashMenuOpen(false)
       setFileSearchOpen(true)
     }
@@ -250,6 +377,15 @@ export function EmptySession() {
         return
       }
       if (event.key === 'Enter' || event.key === 'Tab') {
+        if (
+          event.key === 'Enter' &&
+          exactSlashCommand &&
+          slashFilter.trim().toLowerCase() === exactSlashCommand.name.toLowerCase()
+        ) {
+          event.preventDefault()
+          void handleSubmit()
+          return
+        }
         event.preventDefault()
         const selected = filteredCommands[slashSelectedIndex]
         if (selected) selectSlashCommand(selected.name)
@@ -374,7 +510,7 @@ export function EmptySession() {
     <div className="relative flex flex-1 flex-col overflow-hidden bg-[var(--color-surface)]">
       <div className="flex flex-1 flex-col items-center justify-center p-8 pb-32">
         <div className="flex max-w-md flex-col items-center text-center">
-          <img src="/app-icon.jpg" alt="Claude Code Haha" className="mb-6 h-24 w-24 rounded-[22px]" style={{ boxShadow: 'var(--shadow-dropdown)' }} />
+          <img src="/app-icon.png" alt="Claude Code Haha" className="mb-6 h-24 w-24" />
           <h1 className="mb-2 text-3xl font-extrabold tracking-tight text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>
             {t('empty.title')}
           </h1>
@@ -396,10 +532,37 @@ export function EmptySession() {
                 ref={fileSearchRef}
                 cwd={workDir || ''}
                 filter={atFilter}
-                onSelect={(_path, name) => {
+                onNavigate={(relativePath) => {
+                  if (atCursorPos < 0) return
+                  const replacement = `@${relativePath}`
+                  const tokenEnd = atCursorPos + 1 + atFilter.length
+                  const newValue = `${input.slice(0, atCursorPos)}${replacement}${input.slice(tokenEnd)}`
+                  const newCursorPos = atCursorPos + replacement.length
+                  setInput(newValue)
+                  setAtFilter(relativePath)
+                  requestAnimationFrame(() => {
+                    textareaRef.current?.focus()
+                    textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
+                  })
+                }}
+                onSelect={(path, name) => {
                   if (atCursorPos >= 0) {
-                    const newValue = `${input.slice(0, atCursorPos)}${name}${input.slice(atCursorPos)}`
-                    const newCursorPos = atCursorPos + name.length
+                    const attachmentName = name.split('/').filter(Boolean).pop() ?? name
+                    const tokenEnd = atCursorPos + 1 + atFilter.length
+                    const beforeToken = input.slice(0, atCursorPos)
+                    const afterToken = beforeToken ? input.slice(tokenEnd) : input.slice(tokenEnd).replace(/^\s+/, '')
+                    const spacer = beforeToken && afterToken && !/\s$/.test(beforeToken) && !/^\s/.test(afterToken) ? ' ' : ''
+                    const newValue = `${beforeToken}${spacer}${afterToken}`
+                    const newCursorPos = atCursorPos + spacer.length
+                    setAttachments((prev) => [
+                      ...prev,
+                      {
+                        id: `att-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                        name: attachmentName,
+                        type: 'file',
+                        path,
+                      },
+                    ])
                     setInput(newValue)
                     setFileSearchOpen(false)
                     setAtFilter('')
@@ -411,6 +574,17 @@ export function EmptySession() {
                   }
                 }}
               />
+            )}
+
+            {localSlashPanel && (
+              <div ref={slashMenuRef}>
+                <LocalSlashCommandPanel
+                  command={localSlashPanel}
+                  cwd={workDir || undefined}
+                  commands={allSlashCommands}
+                  onClose={() => setLocalSlashPanel(null)}
+                />
+              </div>
             )}
 
             {slashMenuOpen && filteredCommands.length > 0 && (
@@ -493,10 +667,10 @@ export function EmptySession() {
               </div>
 
               <div className="flex items-center gap-3">
-                <ModelSelector />
+                <ModelSelector runtimeKey={DRAFT_RUNTIME_SELECTION_KEY} disabled={isSubmitting || isCreatingSession} />
                 <button
                   onClick={handleSubmit}
-                  disabled={(!input.trim() && attachments.length === 0) || isSubmitting}
+                  disabled={(!input.trim() && attachments.length === 0) || isSubmitting || isCreatingSession}
                   className="flex w-[112px] items-center justify-center gap-1 rounded-lg bg-[image:var(--gradient-btn-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-btn-primary-fg)] shadow-[var(--shadow-button-primary)] transition-all hover:brightness-105 disabled:opacity-30"
                 >
                   {t('common.run')}
@@ -507,7 +681,7 @@ export function EmptySession() {
           </div>
 
           <div>
-            <DirectoryPicker value={workDir} onChange={setWorkDir} />
+            <DirectoryPicker value={workDir} onChange={(path) => void openDraftSessionForWorkDir(path)} />
           </div>
         </div>
       </div>

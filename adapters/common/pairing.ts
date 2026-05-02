@@ -58,9 +58,9 @@ function readConfigFile(): Record<string, any> {
 function writeConfigFile(data: Record<string, any>): void {
   const filePath = getConfigPath()
   const dir = path.dirname(filePath)
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  const tmp = `${filePath}.tmp.${Date.now()}`
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf-8')
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const tmp = `${filePath}.tmp.${crypto.randomBytes(8).toString('hex')}`
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 })
   fs.renameSync(tmp, filePath)
 }
 

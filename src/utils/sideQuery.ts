@@ -17,6 +17,7 @@ import { getAnthropicClient } from '../services/api/client.js'
 import { getModelBetas, modelSupportsStructuredOutputs } from './betas.js'
 import { computeFingerprint } from './fingerprint.js'
 import { normalizeModelStringForAPI } from './model/model.js'
+import { shouldSendExplicitDisabledThinking } from './thinking.js'
 
 type MessageParam = Anthropic.MessageParam
 type TextBlockParam = Anthropic.TextBlockParam
@@ -166,15 +167,7 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
         : []),
   ].filter((block): block is TextBlockParam => block !== null)
 
-  let thinkingConfig: BetaThinkingConfigParam | undefined
-  if (thinking === false) {
-    thinkingConfig = { type: 'disabled' }
-  } else if (thinking !== undefined) {
-    thinkingConfig = {
-      type: 'enabled',
-      budget_tokens: Math.min(thinking, max_tokens - 1),
-    }
-  }
+  const thinkingConfig = resolveSideQueryThinkingConfig(thinking, max_tokens)
 
   const normalizedModel = normalizeModelStringForAPI(model)
   const start = Date.now()
@@ -219,4 +212,23 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
   setLastApiCompletionTimestamp(now)
 
   return response
+}
+
+export function resolveSideQueryThinkingConfig(
+  thinking: SideQueryOptions['thinking'],
+  maxTokens: number,
+): BetaThinkingConfigParam | undefined {
+  if (
+    thinking === false ||
+    (thinking === undefined && shouldSendExplicitDisabledThinking())
+  ) {
+    return { type: 'disabled' }
+  }
+  if (thinking !== undefined) {
+    return {
+      type: 'enabled',
+      budget_tokens: Math.min(thinking, maxTokens - 1),
+    }
+  }
+  return undefined
 }

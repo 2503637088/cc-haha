@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MessageEntry } from '../types/session'
+import { useSessionRuntimeStore } from './sessionRuntimeStore'
 
 const {
   sendMock,
@@ -95,7 +96,7 @@ vi.mock('./cliTaskStore', () => ({
   },
 }))
 
-import { mapHistoryMessagesToUiMessages, useChatStore } from './chatStore'
+import { mapHistoryMessagesToUiMessages, reconstructAgentNotifications, useChatStore } from './chatStore'
 
 const TEST_SESSION_ID = 'test-session-1'
 const initialState = useChatStore.getState()
@@ -114,6 +115,8 @@ describe('chatStore history mapping', () => {
     refreshTasksMock.mockReset()
     cliTaskStoreSnapshot.tasks = []
     cliTaskStoreSnapshot.sessionId = null
+    useSessionRuntimeStore.setState({ selections: {} })
+    localStorage.clear()
     useChatStore.setState({
       ...initialState,
       sessions: {},
@@ -157,6 +160,136 @@ describe('chatStore history mapping', () => {
     expect(mapped[3]).toMatchObject({ parentToolUseId: 'agent-1' })
   })
 
+  it('merges consecutive assistant text blocks when restoring transcript history', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'assistant-merge-1',
+        type: 'assistant',
+        timestamp: '2026-04-06T00:00:00.000Z',
+        model: 'opus',
+        content: [
+          { type: 'text', text: '第一段：Windows 下的桌面端输出。' },
+          { type: 'text', text: '\r\n第二段：刷新后也不应该被拆开。' },
+        ],
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped).toMatchObject([
+      {
+        type: 'assistant_text',
+        content: '第一段：Windows 下的桌面端输出。\r\n第二段：刷新后也不应该被拆开。',
+      },
+    ])
+  })
+
+  it('skips whitespace-only assistant transcript messages', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'assistant-empty',
+        type: 'assistant',
+        timestamp: '2026-04-06T00:00:00.000Z',
+        model: 'opus',
+        content: '\n\n  ',
+      },
+      {
+        id: 'assistant-real',
+        type: 'assistant',
+        timestamp: '2026-04-06T00:00:01.000Z',
+        model: 'opus',
+        content: '可见回复',
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped).toMatchObject([
+      {
+        id: 'assistant-real',
+        type: 'assistant_text',
+        content: '可见回复',
+      },
+    ])
+  })
+
+  it('filters task-notification turns and resumes at the next real user message', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'user-real-1',
+        type: 'user',
+        timestamp: '2026-04-06T00:00:00.000Z',
+        content: '创建项目',
+      },
+      {
+        id: 'assistant-real-1',
+        type: 'assistant',
+        timestamp: '2026-04-06T00:00:01.000Z',
+        content: [{ type: 'text', text: '项目创建好了' }],
+      },
+      {
+        id: 'task-notification',
+        type: 'user',
+        timestamp: '2026-04-06T00:00:02.000Z',
+        content: '<task-notification>\n<task-id>bg-1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<status>completed</status>\n<summary>Background command completed</summary>\n</task-notification>',
+      },
+      {
+        id: 'assistant-task-response',
+        type: 'assistant',
+        timestamp: '2026-04-06T00:00:03.000Z',
+        content: [{ type: 'text', text: '旧后台任务通知，无需处理' }],
+      },
+      {
+        id: 'user-real-2',
+        type: 'user',
+        timestamp: '2026-04-06T00:00:04.000Z',
+        content: '继续真实问题',
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped).toMatchObject([
+      {
+        id: 'user-real-1',
+        type: 'user_text',
+        content: '创建项目',
+      },
+      {
+        type: 'assistant_text',
+        content: '项目创建好了',
+      },
+      {
+        id: 'user-real-2',
+        type: 'user_text',
+        content: '继续真实问题',
+      },
+    ])
+    expect(JSON.stringify(mapped)).not.toContain('<task-notification>')
+    expect(JSON.stringify(mapped)).not.toContain('旧后台任务通知')
+  })
+
+  it('reconstructs task notifications from transcript XML before filtering it from UI', () => {
+    const restored = reconstructAgentNotifications([
+      {
+        id: 'task-notification',
+        type: 'user',
+        timestamp: '2026-04-06T00:00:00.000Z',
+        content: '<task-notification>\n<task-id>bg-1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<status>completed</status>\n<summary>Background command &amp; agent done</summary>\n<output-file>C:\\Temp\\bg.output</output-file>\n</task-notification>',
+      },
+    ])
+
+    expect(restored).toEqual({
+      toolu_bg: {
+        taskId: 'bg-1',
+        toolUseId: 'toolu_bg',
+        status: 'completed',
+        summary: 'Background command & agent done',
+        outputFile: 'C:\\Temp\\bg.output',
+      },
+    })
+  })
+
   it('surfaces teammate prompt content when mapping member transcript history', () => {
     const messages: MessageEntry[] = [
       {
@@ -179,6 +312,190 @@ describe('chatStore history mapping', () => {
     ])
   })
 
+  it('preserves source user ids when restoring array-content user prompts', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'user-with-attachment',
+        type: 'user',
+        timestamp: '2026-04-06T00:00:00.000Z',
+        content: [
+          { type: 'text', text: '请看这个文件' },
+          { type: 'file', name: 'report.md' },
+        ],
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped).toMatchObject([
+      {
+        id: 'user-with-attachment',
+        type: 'user_text',
+        content: '请看这个文件',
+        attachments: [{ type: 'file', name: 'report.md' }],
+      },
+    ])
+  })
+
+  it('restores CLI file mentions as visible attachment chips from transcript history', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'user-with-file-mention',
+        type: 'user',
+        timestamp: '2026-04-06T00:00:00.000Z',
+        content: '@"/private/tmp/example/src/sentinel.ts" 这个常量是什么？',
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped).toMatchObject([
+      {
+        id: 'user-with-file-mention',
+        type: 'user_text',
+        content: '这个常量是什么？',
+        modelContent: '@"/private/tmp/example/src/sentinel.ts" 这个常量是什么？',
+        attachments: [{
+          type: 'file',
+          name: 'sentinel.ts',
+          path: '/private/tmp/example/src/sentinel.ts',
+        }],
+      },
+    ])
+  })
+
+  it('keeps workspace reference chips visible while sending CLI attachment paths', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      'Notes for attached workspace files:\n- src/App.tsx:L4\n  Comment: tighten this',
+      [{
+        type: 'file',
+        name: 'App.tsx',
+        path: '/repo/src/App.tsx',
+        lineStart: 4,
+        lineEnd: 4,
+        note: 'tighten this',
+        quote: 'const value = 1',
+      }],
+      {
+        displayContent: '改这里',
+        displayAttachments: [{
+          type: 'file',
+          name: 'App.tsx',
+          path: 'src/App.tsx',
+          lineStart: 4,
+          lineEnd: 4,
+          note: 'tighten this',
+          quote: 'const value = 1',
+        }],
+      },
+    )
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      {
+        type: 'user_text',
+        content: '改这里',
+        modelContent: '@"/repo/src/App.tsx" Notes for attached workspace files:\n- src/App.tsx:L4\n  Comment: tighten this',
+        attachments: [{
+          type: 'file',
+          name: 'App.tsx',
+          path: 'src/App.tsx',
+          lineStart: 4,
+          lineEnd: 4,
+          note: 'tighten this',
+          quote: 'const value = 1',
+        }],
+      },
+    ])
+    expect(sendMock).toHaveBeenCalledWith(
+      TEST_SESSION_ID,
+      {
+        type: 'user_message',
+        content: 'Notes for attached workspace files:\n- src/App.tsx:L4\n  Comment: tighten this',
+        attachments: [{
+          type: 'file',
+          name: 'App.tsx',
+          path: '/repo/src/App.tsx',
+          lineStart: 4,
+          lineEnd: 4,
+          note: 'tighten this',
+          quote: 'const value = 1',
+        }],
+      },
+    )
+  })
+
+  it('stores server-materialized attachment prefixes for rewind matching', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      '记一下这个文件讲了什么东西。',
+      [{ type: 'file', name: 'conditions.py', path: '/repo/backend/conditions.py' }],
+      {
+        displayContent: '记一下这个文件讲了什么东西。',
+        displayAttachments: [{ type: 'file', name: 'conditions.py', path: 'backend/conditions.py' }],
+      },
+    )
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      {
+        type: 'user_text',
+        content: '记一下这个文件讲了什么东西。',
+        modelContent: '@"/repo/backend/conditions.py" 记一下这个文件讲了什么东西。',
+        attachments: [{
+          type: 'file',
+          name: 'conditions.py',
+          path: 'backend/conditions.py',
+        }],
+      },
+    ])
+  })
+
   it('keeps parent tool linkage for live tool events', () => {
     // Initialize the session first
     useChatStore.setState({
@@ -197,7 +514,7 @@ describe('chatStore history mapping', () => {
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
           elapsedSeconds: 0,
           statusVerb: '',
-          slashCommands: [],
+          slashCommands: [{ name: 'old-command', description: 'Old command' }],
           agentTaskNotifications: {},
           elapsedTimer: null,
         },
@@ -232,6 +549,75 @@ describe('chatStore history mapping', () => {
         parentToolUseId: 'agent-1',
       },
     ])
+  })
+
+  it('replays saved runtime selection when reconnecting a session', () => {
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, {
+      providerId: 'provider-1',
+      modelId: 'kimi-k2.6',
+    })
+
+    useChatStore.getState().connectToSession(TEST_SESSION_ID)
+
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'set_runtime_config',
+      providerId: 'provider-1',
+      modelId: 'kimi-k2.6',
+    })
+    expect(sendMock.mock.calls.slice(0, 2)).toEqual([
+      [
+        TEST_SESSION_ID,
+        {
+          type: 'set_runtime_config',
+          providerId: 'provider-1',
+          modelId: 'kimi-k2.6',
+        },
+      ],
+      [TEST_SESSION_ID, { type: 'prewarm_session' }],
+    ])
+  })
+
+  it('prewarms regular desktop sessions when connecting', () => {
+    useChatStore.getState().connectToSession(TEST_SESSION_ID)
+
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'prewarm_session',
+    })
+  })
+
+  it('does not prewarm team member sessions', () => {
+    getMemberBySessionIdMock.mockReturnValue({
+      agentId: 'reviewer@test-team',
+      role: 'reviewer',
+      status: 'running',
+    })
+
+    useChatStore.getState().connectToSession(TEST_SESSION_ID)
+
+    expect(sendMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'prewarm_session',
+    })
+  })
+
+  it('does not prewarm synthetic app tabs', () => {
+    useChatStore.getState().connectToSession('__settings__')
+
+    expect(sendMock).not.toHaveBeenCalledWith('__settings__', {
+      type: 'prewarm_session',
+    })
+  })
+
+  it('sends explicit runtime overrides over websocket', () => {
+    useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
+      providerId: null,
+      modelId: 'claude-opus-4-7',
+    })
+
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'set_runtime_config',
+      providerId: null,
+      modelId: 'claude-opus-4-7',
+    })
   })
 
   it('keeps AskUserQuestion permission requests out of the message list while tracking the pending request', () => {
@@ -385,6 +771,83 @@ describe('chatStore history mapping', () => {
     })
   })
 
+  it('clears local desktop chat state when the server confirms /clear', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: {
+          messages: [
+            { id: 'u1', type: 'user_text', content: '/clear', timestamp: Date.now() },
+            { id: 'a1', type: 'assistant_text', content: 'old context', timestamp: Date.now() },
+          ],
+          chatState: 'thinking',
+          connectionState: 'connected',
+          streamingText: 'pending',
+          streamingToolInput: 'tool',
+          activeToolUseId: 'tool-1',
+          activeToolName: 'Read',
+          activeThinkingId: 'thinking-1',
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 12, output_tokens: 34 },
+          elapsedSeconds: 5,
+          statusVerb: 'Thinking',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'session_cleared',
+      message: 'Conversation cleared',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.messages).toEqual([])
+    expect(session?.streamingText).toBe('')
+    expect(session?.chatState).toBe('idle')
+    expect(session?.tokenUsage).toEqual({ input_tokens: 0, output_tokens: 0 })
+    expect(session?.slashCommands).toEqual([])
+    expect(clearTasksMock).toHaveBeenCalled()
+  })
+
+  it('renders compact boundary notifications as system messages', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'compact_boundary',
+      message: 'Context compacted',
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      { type: 'system', content: 'Context compacted' },
+    ])
+  })
+
   it('flushes the previous assistant draft before starting a new user turn', () => {
     useChatStore.setState({
       sessions: {
@@ -530,6 +993,133 @@ describe('chatStore history mapping', () => {
     expect(
       useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState,
     ).toBe('permission_pending')
+  })
+
+  it('keeps delayed text blocks from one streamed assistant turn in a single message', () => {
+    vi.useFakeTimers()
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_start',
+      blockType: 'text',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_delta',
+      text: '第一段：先到达。',
+    })
+    vi.advanceTimersByTime(60)
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_start',
+      blockType: 'text',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_delta',
+      text: '\r\n第二段：稍后到达，但仍属于同一轮回复。',
+    })
+    vi.advanceTimersByTime(60)
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 2 },
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      {
+        type: 'assistant_text',
+        content: '第一段：先到达。\r\n第二段：稍后到达，但仍属于同一轮回复。',
+      },
+    ])
+
+    vi.runOnlyPendingTimers()
+    vi.useRealTimers()
+  })
+
+  it('does not split one streamed markdown reply when task progress arrives mid-stream', () => {
+    vi.useFakeTimers()
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_start',
+      blockType: 'text',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_delta',
+      text: '1. **`core/audio/waveform.py:19-31`** — 同步阻塞 I/O。',
+    })
+    vi.advanceTimersByTime(60)
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'status',
+      state: 'tool_executing',
+      verb: 'Task in progress',
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_delta',
+      text: ' 建议直接用 `subprocess.PIPE` 流式处理。',
+    })
+    vi.advanceTimersByTime(60)
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 2 },
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      {
+        type: 'assistant_text',
+        content:
+          '1. **`core/audio/waveform.py:19-31`** — 同步阻塞 I/O。 建议直接用 `subprocess.PIPE` 流式处理。',
+      },
+    ])
+
+    vi.runOnlyPendingTimers()
+    vi.useRealTimers()
   })
 
   it('sends Computer Use approval payloads back over websocket', () => {

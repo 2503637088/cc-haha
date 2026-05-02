@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { settingsApi } from '../api/settings'
 import { modelsApi } from '../api/models'
-import type { PermissionMode, EffortLevel, ModelInfo, ThemeMode } from '../types/settings'
+import type { PermissionMode, EffortLevel, ModelInfo, ThemeMode, WebSearchSettings } from '../types/settings'
 import type { Locale } from '../i18n'
 import { useUIStore } from './uiStore'
 
@@ -12,18 +12,20 @@ function getStoredLocale(): Locale {
     const stored = localStorage.getItem(LOCALE_STORAGE_KEY)
     if (stored === 'en' || stored === 'zh') return stored
   } catch { /* localStorage unavailable */ }
-  return 'en'
+  return 'zh'
 }
 
 type SettingsStore = {
   permissionMode: PermissionMode
   currentModel: ModelInfo | null
   effortLevel: EffortLevel
+  thinkingEnabled: boolean
   availableModels: ModelInfo[]
   activeProviderName: string | null
   locale: Locale
   theme: ThemeMode
   skipWebFetchPreflight: boolean
+  webSearch: WebSearchSettings
   isLoading: boolean
   error: string | null
 
@@ -31,20 +33,24 @@ type SettingsStore = {
   setPermissionMode: (mode: PermissionMode) => Promise<void>
   setModel: (modelId: string) => Promise<void>
   setEffort: (level: EffortLevel) => Promise<void>
+  setThinkingEnabled: (enabled: boolean) => Promise<void>
   setLocale: (locale: Locale) => void
   setTheme: (theme: ThemeMode) => Promise<void>
   setSkipWebFetchPreflight: (enabled: boolean) => Promise<void>
+  setWebSearch: (settings: WebSearchSettings) => Promise<void>
 }
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   permissionMode: 'default',
   currentModel: null,
   effortLevel: 'medium',
+  thinkingEnabled: true,
   availableModels: [],
   activeProviderName: null,
   locale: getStoredLocale(),
   theme: useUIStore.getState().theme,
   skipWebFetchPreflight: true,
+  webSearch: { mode: 'auto', tavilyApiKey: '', braveApiKey: '' },
   isLoading: false,
   error: null,
 
@@ -66,8 +72,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         activeProviderName: modelsRes.provider?.name ?? null,
         currentModel: model,
         effortLevel: level,
+        thinkingEnabled: userSettings.alwaysThinkingEnabled !== false,
         theme,
         skipWebFetchPreflight: userSettings.skipWebFetchPreflight !== false,
+        webSearch: normalizeWebSearchSettings(userSettings.webSearch),
         isLoading: false,
         error: null,
       })
@@ -105,6 +113,16 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
+  setThinkingEnabled: async (enabled) => {
+    const prev = get().thinkingEnabled
+    set({ thinkingEnabled: enabled })
+    try {
+      await settingsApi.updateUser({ alwaysThinkingEnabled: enabled ? undefined : false })
+    } catch {
+      set({ thinkingEnabled: prev })
+    }
+  },
+
   setLocale: (locale) => {
     set({ locale })
     try { localStorage.setItem(LOCALE_STORAGE_KEY, locale) } catch { /* noop */ }
@@ -131,4 +149,23 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       set({ skipWebFetchPreflight: prev })
     }
   },
+
+  setWebSearch: async (webSearch) => {
+    const prev = get().webSearch
+    const next = normalizeWebSearchSettings(webSearch)
+    set({ webSearch: next })
+    try {
+      await settingsApi.updateUser({ webSearch: next })
+    } catch {
+      set({ webSearch: prev })
+    }
+  },
 }))
+
+function normalizeWebSearchSettings(settings: WebSearchSettings | undefined): WebSearchSettings {
+  return {
+    mode: settings?.mode ?? 'auto',
+    tavilyApiKey: settings?.tavilyApiKey ?? '',
+    braveApiKey: settings?.braveApiKey ?? '',
+  }
+}

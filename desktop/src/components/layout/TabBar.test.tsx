@@ -6,6 +6,9 @@ const startDraggingMock = vi.hoisted(() => vi.fn(() => Promise.resolve()))
 const getCurrentWindowMock = vi.hoisted(() => vi.fn(() => ({
   startDragging: startDraggingMock,
 })))
+const windowControlsMock = vi.hoisted(() => ({
+  show: true,
+}))
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: getCurrentWindowMock,
@@ -23,6 +26,9 @@ vi.mock('../../i18n', () => ({
       'tabs.closeConfirmMessage': 'Still running',
       'tabs.closeConfirmKeep': 'Keep Running',
       'tabs.closeConfirmStop': 'Stop & Close',
+      'tabs.openTerminal': 'Open Terminal',
+      'tabs.showWorkspace': 'Show Workspace',
+      'tabs.hideWorkspace': 'Hide Workspace',
       'common.cancel': 'Cancel',
     }
 
@@ -31,8 +37,10 @@ vi.mock('../../i18n', () => ({
 }))
 
 vi.mock('./WindowControls', () => ({
-  WindowControls: () => <div data-testid="window-controls" />,
-  showWindowControls: true,
+  WindowControls: () => (windowControlsMock.show ? <div data-testid="window-controls" /> : null),
+  get showWindowControls() {
+    return windowControlsMock.show
+  },
 }))
 
 describe('TabBar', () => {
@@ -58,17 +66,20 @@ describe('TabBar', () => {
 
     startDraggingMock.mockClear()
     getCurrentWindowMock.mockClear()
+    windowControlsMock.show = true
     vi.resetModules()
   })
 
   afterEach(async () => {
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
+    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
 
     useTabStore.setState({ tabs: [], activeTabId: null })
     useChatStore.setState({
       sessions: {},
     } as Partial<ReturnType<typeof useChatStore.getState>>)
+    useWorkspacePanelStore.setState(useWorkspacePanelStore.getInitialState(), true)
 
     delete (window as typeof window & { __TAURI__?: unknown }).__TAURI__
   })
@@ -127,6 +138,25 @@ describe('TabBar', () => {
 
     const rightButton = screen.getByText('chevron_right').closest('button')
     expect(rightButton?.nextElementSibling).toBe(screen.getByTestId('window-controls'))
+  })
+
+  it('shows the terminal toolbar when no tabs are open', async () => {
+    windowControlsMock.show = false
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+
+    useTabStore.setState({ tabs: [], activeTabId: null })
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Terminal' }))
+
+    const terminalTabs = useTabStore.getState().tabs.filter((tab) => tab.type === 'terminal')
+    expect(terminalTabs).toHaveLength(1)
+    expect(useTabStore.getState().activeTabId).toBe(terminalTabs[0]?.sessionId)
+    expect(screen.queryByTestId('window-controls')).not.toBeInTheDocument()
   })
 
   it('marks the tab bar as a native drag region', async () => {
@@ -294,5 +324,184 @@ describe('TabBar', () => {
 
     expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['tab-1', 'tab-2'])
     expect(useTabStore.getState().activeTabId).toBe('tab-1')
+  })
+
+  it('closes a tab from the close button without activating drag behavior', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    const disconnectSession = vi.fn()
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'tab-1', title: 'First Session', type: 'session', status: 'idle' },
+        { sessionId: 'tab-2', title: 'Second Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'tab-2',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession,
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    const firstTab = screen.getByText('First Session').closest('.tab-bar-hit-area')
+    const closeButton = screen.getByLabelText('Close First Session')
+
+    expect(firstTab).toHaveClass('group')
+
+    fireEvent.mouseDown(closeButton, { button: 0, clientX: 20, clientY: 10 })
+    fireEvent.click(closeButton)
+    fireEvent.mouseMove(window, { clientX: 260, clientY: 10 })
+    fireEvent.mouseUp(window)
+
+    expect(disconnectSession).toHaveBeenCalledWith('tab-1')
+    expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['tab-2'])
+    expect(useTabStore.getState().activeTabId).toBe('tab-2')
+  })
+
+  it('closes terminal tabs without disconnecting chat sessions', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    const disconnectSession = vi.fn()
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: '__terminal__1', title: 'Terminal 1', type: 'terminal', status: 'idle' },
+      ],
+      activeTabId: '__terminal__1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession,
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    expect(screen.getByLabelText('Open Terminal')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByLabelText('Close Terminal 1'))
+
+    expect(disconnectSession).not.toHaveBeenCalled()
+    expect(useTabStore.getState().tabs).toEqual([])
+  })
+
+  it('opens a terminal tab from the toolbar', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'tab-1', title: 'First Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'tab-1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Terminal' }))
+
+    const terminalTabs = useTabStore.getState().tabs.filter((tab) => tab.type === 'terminal')
+    expect(terminalTabs).toHaveLength(1)
+    expect(useTabStore.getState().activeTabId).toBe(terminalTabs[0]?.sessionId)
+  })
+
+  it('toggles the workspace panel for the active session from the toolbar', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'tab-1', title: 'First Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'tab-1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show Workspace' }))
+    expect(useWorkspacePanelStore.getState().isPanelOpen('tab-1')).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide Workspace' }))
+    expect(useWorkspacePanelStore.getState().isPanelOpen('tab-1')).toBe(false)
+  })
+
+  it('hides the workspace toolbar button for non-session tabs', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: '__terminal__1', title: 'Terminal 1', type: 'terminal', status: 'idle' },
+        { sessionId: '__settings__', title: 'Settings', type: 'settings', status: 'idle' },
+      ],
+      activeTabId: '__terminal__1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    const { rerender } = render(<TabBar />)
+
+    expect(screen.queryByRole('button', { name: 'Show Workspace' })).not.toBeInTheDocument()
+
+    await act(async () => {
+      useTabStore.getState().setActiveTab('__settings__')
+    })
+    rerender(<TabBar />)
+
+    expect(screen.queryByRole('button', { name: 'Show Workspace' })).not.toBeInTheDocument()
+  })
+
+  it('clears workspace panel state when closing a session tab', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'tab-1', title: 'First Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'tab-1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+    useWorkspacePanelStore.getState().openPanel('tab-1')
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByLabelText('Close First Session'))
+
+    expect(useWorkspacePanelStore.getState().panelBySession['tab-1']).toBeUndefined()
   })
 })

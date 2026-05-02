@@ -9,7 +9,13 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { ProviderService } from './providerService.js'
 import { sessionService } from './sessionService.js'
+import { diagnosticsService } from './diagnosticsService.js'
+import {
+  buildClaudeCliArgs,
+  resolveClaudeCliLauncher,
+} from '../../utils/desktopBundledCli.js'
 
 type AttachmentRef = {
   type: 'file' | 'image'
@@ -27,8 +33,13 @@ type SessionProcess = {
   sdkToken: string
   sdkSocket: { send(data: string): void } | null
   pendingOutbound: string[]
+  startupPending: boolean
+  startupExitCode: number | null
+  stdoutLines: string[]
   stderrLines: string[]
+  outputDrain: Promise<void>
   sdkMessages: any[]
+  initMessage: any | null
   pendingPermissionRequests: Map<
     string,
     {
@@ -43,6 +54,8 @@ type SessionStartOptions = {
   permissionMode?: string
   model?: string
   effort?: string
+  thinking?: 'enabled' | 'adaptive' | 'disabled'
+  providerId?: string | null
 }
 
 export class ConversationStartupError extends Error {
@@ -53,7 +66,8 @@ export class ConversationStartupError extends Error {
       | 'CLI_AUTH_REQUIRED'
       | 'CLI_SESSION_CONFLICT'
       | 'CLI_START_FAILED'
-      | 'CLI_SPAWN_FAILED',
+      | 'CLI_SPAWN_FAILED'
+      | 'SESSION_DELETED',
     readonly retryable = false,
   ) {
     super(message)
@@ -63,6 +77,8 @@ export class ConversationStartupError extends Error {
 
 export class ConversationService {
   private sessions = new Map<string, SessionProcess>()
+  private deletedSessions = new Set<string>()
+  private providerService = new ProviderService()
 
   private buildSessionCliArgs(
     sessionId: string,
@@ -97,12 +113,25 @@ export class ConversationService {
     sdkUrl: string,
     options?: SessionStartOptions,
   ): Promise<void> {
+    if (this.deletedSessions.has(sessionId)) {
+      throw new ConversationStartupError(
+        `Session was deleted before startup completed: ${sessionId}`,
+        'SESSION_DELETED',
+      )
+    }
     if (this.sessions.has(sessionId)) return
 
     const launchInfo = await sessionService.getSessionLaunchInfo(sessionId)
     const shouldResume = !!launchInfo && launchInfo.transcriptMessageCount > 0
     const shouldReplacePlaceholder =
       !!launchInfo && launchInfo.transcriptMessageCount === 0
+
+    if (this.deletedSessions.has(sessionId)) {
+      throw new ConversationStartupError(
+        `Session was deleted before startup completed: ${sessionId}`,
+        'SESSION_DELETED',
+      )
+    }
 
     if (shouldReplacePlaceholder) {
       await sessionService.deleteSessionFile(sessionId)
@@ -136,7 +165,7 @@ export class ConversationService {
     // 工作目录就变成 `/`。把 CALLER_DIR / PWD 显式覆盖成 workDir，preload.ts
     // chdir 后落到正确目录。
     //
-    const childEnv = await this.buildChildEnv(workDir, sdkUrl)
+    const childEnv = await this.buildChildEnv(workDir, sdkUrl, options)
 
     let proc: ReturnType<typeof Bun.spawn>
     try {
@@ -144,10 +173,23 @@ export class ConversationService {
         cwd: workDir,
         env: childEnv,
         stdin: 'pipe',
-        stdout: 'ignore',  // CLI communicates via SDK WebSocket, not stdout
+        stdout: 'pipe',
         stderr: 'pipe',
       })
     } catch (spawnErr) {
+      void diagnosticsService.recordEvent({
+        type: 'cli_spawn_failed',
+        severity: 'error',
+        sessionId,
+        summary: spawnErr instanceof Error ? spawnErr.message : String(spawnErr),
+        details: {
+          workDir,
+          permissionMode: options?.permissionMode || 'default',
+          providerId: options?.providerId ?? null,
+          model: options?.model ?? null,
+          error: spawnErr,
+        },
+      })
       throw new ConversationStartupError(
         `Failed to spawn CLI in ${workDir}: ${
           spawnErr instanceof Error ? spawnErr.message : String(spawnErr)
@@ -164,16 +206,24 @@ export class ConversationService {
       sdkToken: this.getSdkTokenFromUrl(sdkUrl),
       sdkSocket: null,
       pendingOutbound: [],
+      startupPending: true,
+      startupExitCode: null,
+      stdoutLines: [],
       stderrLines: [],
+      outputDrain: Promise.resolve(),
       sdkMessages: [],
+      initMessage: null,
       pendingPermissionRequests: new Map(),
     }
     this.sessions.set(sessionId, session)
 
-    this.readErrorStream(sessionId, proc)
+    session.outputDrain = Promise.all([
+      this.readProcessOutputStream(sessionId, proc.stdout, 'stdout'),
+      this.readProcessOutputStream(sessionId, proc.stderr, 'stderr'),
+    ]).then(() => undefined)
 
     proc.exited.then((code) => {
-      this.handleProcessExit(sessionId, proc, code)
+      void this.handleProcessExit(sessionId, proc, code)
     })
 
     const STARTUP_GRACE_MS = 3000
@@ -184,8 +234,10 @@ export class ConversationService {
       ),
     ])
 
-    if (earlyExitCode !== null) {
-      const startupError = this.buildStartupError(sessionId, earlyExitCode)
+    const startupExitCode = earlyExitCode ?? session.startupExitCode
+    if (startupExitCode !== null) {
+      await this.waitForProcessOutputDrain(session)
+      const startupError = this.buildStartupError(sessionId, startupExitCode)
       this.sessions.delete(sessionId)
 
       if (this.clearStaleLock(sessionId)) {
@@ -196,10 +248,29 @@ export class ConversationService {
       }
 
       console.error(
-        `[ConversationService] CLI exited with code ${earlyExitCode} for ${sessionId}: ${startupError.message}`,
+        `[ConversationService] CLI exited with code ${startupExitCode} for ${sessionId}: ${startupError.message}`,
       )
+      void diagnosticsService.recordEvent({
+        type: 'cli_start_failed',
+        severity: 'error',
+        sessionId,
+        summary: startupError.message,
+        details: {
+          code: startupError.code,
+          exitCode: startupExitCode,
+          retryable: startupError.retryable,
+          workDir,
+          permissionMode: options?.permissionMode || 'default',
+          providerId: options?.providerId ?? null,
+          model: options?.model ?? null,
+          capturedOutput: this.buildCapturedProcessOutputDetail(session),
+          sdkMessages: this.summarizeSdkMessages(session.sdkMessages),
+        },
+      })
       throw startupError
     }
+
+    session.startupPending = false
 
     if (shouldReplacePlaceholder || !launchInfo) {
       await sessionService.appendSessionMetadata(sessionId, {
@@ -223,6 +294,20 @@ export class ConversationService {
     if (session) {
       session.outputCallbacks = []
     }
+  }
+
+  removeOutputCallback(sessionId: string, callback: (msg: any) => void): void {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    session.outputCallbacks = session.outputCallbacks.filter((entry) => entry !== callback)
+  }
+
+  getRecentSdkMessages(sessionId: string): any[] {
+    return [...(this.sessions.get(sessionId)?.sdkMessages ?? [])]
+  }
+
+  getSessionInitMessage(sessionId: string): any | null {
+    return this.sessions.get(sessionId)?.initMessage ?? null
   }
 
   sendMessage(
@@ -298,6 +383,60 @@ export class ConversationService {
     })
   }
 
+  requestControl(
+    sessionId: string,
+    request: Record<string, unknown>,
+    timeoutMs = 10_000,
+  ): Promise<Record<string, unknown>> {
+    if (!this.sessions.has(sessionId)) {
+      return Promise.reject(new Error('CLI session is not running'))
+    }
+
+    const requestId = crypto.randomUUID()
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.removeOutputCallback(sessionId, handleOutput)
+        reject(new Error(`Timed out waiting for ${String(request.subtype ?? 'control')} response`))
+      }, timeoutMs)
+
+      const finish = (fn: () => void) => {
+        clearTimeout(timeout)
+        this.removeOutputCallback(sessionId, handleOutput)
+        fn()
+      }
+
+      const handleOutput = (msg: any) => {
+        if (
+          msg?.type !== 'control_response' ||
+          msg.response?.request_id !== requestId
+        ) {
+          return
+        }
+
+        if (msg.response.subtype === 'error') {
+          finish(() => reject(new Error(String(msg.response.error || 'Control request failed'))))
+          return
+        }
+
+        finish(() => resolve(
+          msg.response.response && typeof msg.response.response === 'object'
+            ? msg.response.response as Record<string, unknown>
+            : {},
+        ))
+      }
+
+      this.onOutput(sessionId, handleOutput)
+      const sent = this.sendSdkMessage(sessionId, {
+        type: 'control_request',
+        request_id: requestId,
+        request,
+      })
+      if (!sent) {
+        finish(() => reject(new Error('CLI session is not running')))
+      }
+    })
+  }
+
   hasSession(sessionId: string): boolean {
     return this.sessions.has(sessionId)
   }
@@ -360,6 +499,9 @@ export class ConversationService {
         if (session.sdkMessages.length > 40) {
           session.sdkMessages.splice(0, 20)
         }
+        if (msg?.type === 'system' && msg.subtype === 'init') {
+          session.initMessage = msg
+        }
         if (
           msg?.type === 'control_request' &&
           msg.request?.subtype === 'can_use_tool' &&
@@ -398,17 +540,23 @@ export class ConversationService {
     }
   }
 
+  markSessionDeleted(sessionId: string): void {
+    this.deletedSessions.add(sessionId)
+    this.stopSession(sessionId)
+  }
+
   getActiveSessions(): string[] {
     return Array.from(this.sessions.keys())
   }
 
-  private async readErrorStream(
+  private async readProcessOutputStream(
     sessionId: string,
-    proc: ReturnType<typeof Bun.spawn>,
+    stream: ReadableStream | null | undefined,
+    streamName: 'stdout' | 'stderr',
   ): Promise<void> {
-    if (!proc.stderr) return
+    if (!stream) return
 
-    const reader = (proc.stderr as ReadableStream).getReader()
+    const reader = stream.getReader()
     const decoder = new TextDecoder()
 
     try {
@@ -425,18 +573,36 @@ export class ConversationService {
             .split('\n')
             .map((entry) => entry.trim())
             .filter(Boolean)) {
-            session.stderrLines.push(line)
-            if (session.stderrLines.length > 20) {
-              session.stderrLines.splice(0, 10)
+            const lines =
+              streamName === 'stderr' ? session.stderrLines : session.stdoutLines
+            lines.push(this.redactProcessOutput(line))
+            if (lines.length > 20) {
+              lines.splice(0, 10)
             }
           }
         }
 
-        console.error(`[CLI:${sessionId}] ${text.trim()}`)
+        const logLine = this.redactProcessOutput(text.trim())
+        if (streamName === 'stderr') {
+          console.error(`[CLI:${sessionId}:stderr] ${logLine}`)
+        } else {
+          console.log(`[CLI:${sessionId}:stdout] ${logLine}`)
+        }
       }
     } catch {
-      // stderr read failures should not kill the session
+      // Process output read failures should not kill the session.
     }
+  }
+
+  private async waitForProcessOutputDrain(
+    session: SessionProcess,
+    timeoutMs = 250,
+  ): Promise<void> {
+    const outputDrain = session.outputDrain ?? Promise.resolve()
+    await Promise.race([
+      outputDrain.catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+    ])
   }
 
   private sendSdkMessage(
@@ -455,17 +621,46 @@ export class ConversationService {
     return true
   }
 
-  private handleProcessExit(
+  private async handleProcessExit(
     sessionId: string,
     proc: SessionProcess['proc'],
     code: number,
-  ): void {
+  ): Promise<void> {
     console.log(
       `[ConversationService] CLI process for ${sessionId} exited with code ${code}`,
     )
 
     const activeSession = this.sessions.get(sessionId)
     if (activeSession?.proc === proc) {
+      if (activeSession.startupPending) {
+        activeSession.startupExitCode = code
+        return
+      }
+      await this.waitForProcessOutputDrain(activeSession)
+      const exitError = this.buildRuntimeExitMessage(sessionId, code)
+      void diagnosticsService.recordEvent({
+        type: 'cli_runtime_exit',
+        severity: 'error',
+        sessionId,
+        summary: exitError,
+        details: {
+          exitCode: code,
+          workDir: activeSession.workDir,
+          permissionMode: activeSession.permissionMode,
+          capturedOutput: this.buildCapturedProcessOutputDetail(activeSession),
+          sdkMessages: this.summarizeSdkMessages(activeSession.sdkMessages),
+        },
+      })
+      for (const cb of activeSession.outputCallbacks) {
+        cb({
+          type: 'result',
+          subtype: 'error',
+          is_error: true,
+          result: exitError,
+          usage: { input_tokens: 0, output_tokens: 0 },
+          session_id: sessionId,
+        })
+      }
       this.sessions.delete(sessionId)
     }
   }
@@ -498,12 +693,17 @@ export class ConversationService {
       args.push('--effort', options.effort)
     }
 
+    if (options?.thinking) {
+      args.push('--thinking', options.thinking)
+    }
+
     return args
   }
 
   private async buildChildEnv(
     workDir: string,
     sdkUrl?: string,
+    options?: SessionStartOptions,
   ): Promise<Record<string, string>> {
     // Provider isolation: when Desktop has its own provider config/index,
     // strip inherited provider env vars so the child CLI reads fresh values
@@ -518,13 +718,17 @@ export class ConversationService {
       'ANTHROPIC_AUTH_TOKEN',
       'ANTHROPIC_MODEL',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
       'ANTHROPIC_DEFAULT_SONNET_MODEL',
+      'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
+      'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
+      'CC_HAHA_SEND_DISABLED_THINKING',
     ] as const
 
     const cleanEnv = { ...process.env }
     delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN
-    if (this.shouldStripInheritedProviderEnv()) {
+    if (this.shouldStripInheritedProviderEnv(options?.providerId)) {
       for (const key of PROVIDER_ENV_KEYS) {
         delete cleanEnv[key]
       }
@@ -540,9 +744,18 @@ export class ConversationService {
       }
     }
 
+    const explicitProviderEnv =
+      typeof options?.providerId === 'string'
+        ? await this.providerService.getProviderRuntimeEnv(options.providerId)
+        : null
+    if (explicitProviderEnv && options?.model?.trim()) {
+      explicitProviderEnv.ANTHROPIC_MODEL = options.model.trim()
+    }
+
     return {
       ...cleanEnv,
       CLAUDE_CODE_ENABLE_TASKS: '1',
+      CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
       CALLER_DIR: workDir,
       PWD: workDir,
       ...(sdkUrl
@@ -551,16 +764,26 @@ export class ConversationService {
       ...(desktopServerUrl
         ? { CC_HAHA_DESKTOP_SERVER_URL: desktopServerUrl }
         : {}),
+      ...(sdkUrl
+        ? {
+            CC_HAHA_DESKTOP_AWAIT_MCP: '1',
+            CC_HAHA_DESKTOP_AWAIT_MCP_TIMEOUT_MS: '5000',
+          }
+        : {}),
       // Tell the CLI entrypoint to skip project .env loading. Provider env
       // should come from Desktop-managed config or inherited launch env, not
       // be reintroduced from the repo's .env file.
       CC_HAHA_SKIP_DOTENV: '1',
+      ...(explicitProviderEnv
+        ? { CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' }
+        : {}),
       // "官方" 模式 (cc-haha/settings.json 没 provider env) 下,把 CLI 标记为
       // managed-OAuth,让它忽略外部 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
       // 残留、只走用户 /login 的 OAuth token。自定义 provider 模式绝不能设,
       // 否则 CLI 会忽略 provider 的 AUTH_TOKEN、错误地走 OAuth 打到第三方
       // endpoint。详见 src/utils/auth.ts isManagedOAuthContext()。
-      ...(this.shouldMarkManagedOAuth()
+      ...(explicitProviderEnv ?? {}),
+      ...(this.shouldMarkManagedOAuth(options?.providerId)
         ? await this.buildOfficialOAuthEnv()
         : {}),
     }
@@ -594,7 +817,11 @@ export class ConversationService {
     return env
   }
 
-  private shouldStripInheritedProviderEnv(): boolean {
+  private shouldStripInheritedProviderEnv(providerId?: string | null): boolean {
+    if (providerId !== undefined) {
+      return true
+    }
+
     const configDir =
       process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
     const ccHahaDir = path.join(configDir, 'cc-haha')
@@ -615,8 +842,12 @@ export class ConversationService {
         'ANTHROPIC_AUTH_TOKEN',
         'ANTHROPIC_MODEL',
         'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+        'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
         'ANTHROPIC_DEFAULT_SONNET_MODEL',
+        'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
         'ANTHROPIC_DEFAULT_OPUS_MODEL',
+        'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
+        'CC_HAHA_SEND_DISABLED_THINKING',
       ].some((key) => typeof env[key] === 'string' && env[key]!.trim().length > 0)
     } catch {
       return false
@@ -632,7 +863,14 @@ export class ConversationService {
    * 默认 (读不到 settings.json) 按"官方"处理 — 即使用户从未用过 cc-haha
    * provider 管理,也希望官方 OAuth 能正常工作。
    */
-  private shouldMarkManagedOAuth(): boolean {
+  private shouldMarkManagedOAuth(providerId?: string | null): boolean {
+    if (providerId === null) {
+      return true
+    }
+    if (typeof providerId === 'string') {
+      return false
+    }
+
     const configDir =
       process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
     const settingsPath = path.join(configDir, 'cc-haha', 'settings.json')
@@ -654,38 +892,18 @@ export class ConversationService {
     }
   }
 
-  private resolveBundledCliPath(): string | null {
-    // 桌面端 P0+P2 之后只有一个合并的 sidecar 二进制 —— `claude-sidecar`，
-    // 它通过第一个 positional 参数 (server / cli) 选模式。当前进程要么
-    // 已经是这个 sidecar 自己（spawn 子 CLI 时复用同一个文件），要么是
-    // 旧 dev 模式下走 bin/claude-haha。这里支持两种命名：
-    //   - 桌面端 prod build：进程名 claude-sidecar*
-    //   - 旧 server-only 二进制（向后兼容）：claude-server*
-    const execPath = process.execPath
-    const execName = path.basename(execPath)
-
-    if (execName.startsWith('claude-sidecar')) {
-      // 复用同一个二进制，调用 cli 模式
-      return execPath
-    }
-
-    if (execName.startsWith('claude-server')) {
-      const bundledCliPath = path.join(
-        path.dirname(execPath),
-        execName.replace(/^claude-server/, 'claude-cli'),
-      )
-      return fs.existsSync(bundledCliPath) ? bundledCliPath : null
-    }
-
-    return null
-  }
-
   private resolveCliArgs(baseArgs: string[]): string[] {
-    const cliCommand = process.env.CLAUDE_CLI_PATH || this.resolveBundledCliPath()
-    if (!cliCommand) {
+    const launcher = resolveClaudeCliLauncher({
+      cliPath: process.env.CLAUDE_CLI_PATH,
+      execPath: process.execPath,
+    })
+
+    if (!launcher) {
       if (process.platform === 'win32') {
         return [
           process.execPath,
+          '--preload',
+          path.resolve(import.meta.dir, '../../../preload.ts'),
           path.resolve(import.meta.dir, '../../entrypoints/cli.tsx'),
           ...baseArgs,
         ]
@@ -693,35 +911,7 @@ export class ConversationService {
       return [path.resolve(import.meta.dir, '../../../bin/claude-haha'), ...baseArgs]
     }
 
-    if (/\.(?:[cm]?[jt]s|tsx?)$/i.test(cliCommand)) {
-      return ['bun', cliCommand, ...baseArgs]
-    }
-
-    const cliBaseName = path.basename(cliCommand)
-
-    // 合并 sidecar 模式：第一个参数必须是 'cli'，后面跟 --app-root 透传
-    if (cliBaseName.startsWith('claude-sidecar')) {
-      const args = ['cli', ...baseArgs]
-      if (process.env.CLAUDE_APP_ROOT) {
-        return [cliCommand, 'cli', '--app-root', process.env.CLAUDE_APP_ROOT, ...baseArgs]
-      }
-      return [cliCommand, ...args]
-    }
-
-    // 旧两段式 sidecar：claude-cli 二进制需要 --app-root
-    if (
-      process.env.CLAUDE_APP_ROOT &&
-      cliBaseName.startsWith('claude-cli')
-    ) {
-      return [
-        cliCommand,
-        '--app-root',
-        process.env.CLAUDE_APP_ROOT,
-        ...baseArgs,
-      ]
-    }
-
-    return [cliCommand, ...baseArgs]
+    return buildClaudeCliArgs(launcher, baseArgs, process.env.CLAUDE_APP_ROOT)
   }
 
   private clearStaleLock(sessionId: string): boolean {
@@ -747,7 +937,7 @@ export class ConversationService {
     exitCode: number,
   ): ConversationStartupError {
     const session = this.sessions.get(sessionId)
-    const stderrText = session?.stderrLines.join('\n') ?? ''
+    const capturedOutput = this.buildCapturedProcessOutputDetail(session)
     const recentMessages = session?.sdkMessages ?? []
     const resultMessage = [...recentMessages]
       .reverse()
@@ -758,7 +948,7 @@ export class ConversationService {
     const detail =
       this.extractStartupDetail(resultMessage) ||
       this.extractStartupDetail(authStatus) ||
-      stderrText
+      capturedOutput
 
     if (
       /(not logged in|run \/login|sign in again|login required|unauthenticated|logged_out)/i.test(
@@ -783,10 +973,52 @@ export class ConversationService {
     return new ConversationStartupError(
       normalizedDetail
         ? `CLI exited during startup (code ${exitCode}): ${normalizedDetail}`
-        : `CLI exited during startup with code ${exitCode}.`,
+        : `CLI exited during startup with code ${exitCode}; no CLI stderr/stdout or SDK error payload was captured before exit.`,
       'CLI_START_FAILED',
       true,
     )
+  }
+
+  private buildRuntimeExitMessage(sessionId: string, exitCode: number): string {
+    const session = this.sessions.get(sessionId)
+    const capturedOutput = this.buildCapturedProcessOutputDetail(session)
+    const recentMessages = session?.sdkMessages ?? []
+    const resultMessage = [...recentMessages]
+      .reverse()
+      .find((msg) => msg?.type === 'result' && msg.is_error)
+    const authStatus = [...recentMessages]
+      .reverse()
+      .find((msg) => msg?.type === 'auth_status')
+    const detail =
+      this.extractStartupDetail(resultMessage) ||
+      this.extractStartupDetail(authStatus) ||
+      capturedOutput
+
+    return detail
+      ? `CLI process exited unexpectedly (code ${exitCode}): ${detail}`
+      : `CLI process exited unexpectedly with code ${exitCode}; no CLI stderr/stdout or SDK error payload was captured before exit.`
+  }
+
+  private buildCapturedProcessOutputDetail(
+    session: SessionProcess | undefined,
+  ): string {
+    if (!session) return ''
+
+    const stderrText = (session.stderrLines ?? []).join('\n').trim()
+    const stdoutText = (session.stdoutLines ?? []).join('\n').trim()
+
+    if (stderrText && stdoutText) {
+      return `stderr:\n${stderrText}\nstdout:\n${stdoutText}`
+    }
+
+    return stderrText || stdoutText
+  }
+
+  private redactProcessOutput(line: string): string {
+    return line
+      .replace(/(ANTHROPIC_(?:API_KEY|AUTH_TOKEN)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
+      .replace(/((?:api[_-]?key|auth[_-]?token|access[_-]?token)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
+      .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]+/gi, '$1[REDACTED]')
   }
 
   private extractStartupDetail(message: any): string {
@@ -803,6 +1035,22 @@ export class ConversationService {
     }
 
     return ''
+  }
+
+  private summarizeSdkMessages(messages: any[]): unknown[] {
+    return messages.slice(-10).map((message) => {
+      if (!message || typeof message !== 'object') {
+        return message
+      }
+      return {
+        type: message.type,
+        subtype: message.subtype,
+        is_error: message.is_error,
+        status: typeof message.status === 'string' ? message.status : undefined,
+        result: typeof message.result === 'string' ? message.result : undefined,
+        message: typeof message.message === 'string' ? message.message : undefined,
+      }
+    })
   }
 
   private buildUserContent(

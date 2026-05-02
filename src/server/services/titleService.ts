@@ -7,7 +7,10 @@
  */
 
 import { ProviderService } from './providerService.js'
+import { SettingsService } from './settingsService.js'
 import { sessionService } from './sessionService.js'
+import { PROVIDER_PRESETS } from '../config/providerPresets.js'
+import { isEnvTruthy } from '../../utils/envUtils.js'
 
 const TITLE_MAX_LEN = 50
 
@@ -40,29 +43,42 @@ export function deriveTitle(raw: string): string | undefined {
 }
 
 /**
- * Generate an AI title using the active provider's Haiku model.
+ * Generate an AI title using the session's provider Haiku model when possible.
  * Fire-and-forget — returns null on any failure.
  */
-export async function generateTitle(conversationText: string): Promise<string | null> {
+export async function generateTitle(
+  conversationText: string,
+  providerId?: string | null,
+): Promise<string | null> {
   const trimmed = conversationText.trim()
   if (!trimmed) return null
 
   try {
     const providerService = new ProviderService()
-    const { activeId, providers } = await providerService.listProviders()
-    if (!activeId) return null
+    if (providerId === null) return null
 
-    const provider = providers.find((p) => p.id === activeId)
-    if (!provider?.baseUrl || !provider?.apiKey) return null
+    let resolvedProvider = providerId
+      ? await providerService.getProvider(providerId)
+      : null
 
-    const model = provider.models.haiku || provider.models.main
-    const url = `${provider.baseUrl.replace(/\/+$/, '')}/v1/messages`
+    if (!resolvedProvider) {
+      const { activeId, providers } = await providerService.listProviders()
+      resolvedProvider = activeId
+        ? providers.find((provider) => provider.id === activeId) ?? null
+        : null
+    }
+
+    if (!resolvedProvider?.baseUrl || !resolvedProvider?.apiKey) return null
+
+    const model = resolvedProvider.models.haiku || resolvedProvider.models.main
+    const url = `${resolvedProvider.baseUrl.replace(/\/+$/, '')}/v1/messages`
+    const shouldDisableThinking = await shouldDisableThinkingForTitle(resolvedProvider.presetId)
 
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': provider.apiKey,
+        'x-api-key': resolvedProvider.apiKey,
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
@@ -70,6 +86,7 @@ export async function generateTitle(conversationText: string): Promise<string | 
         max_tokens: 100,
         system: TITLE_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: trimmed.slice(0, 2000) }],
+        ...(shouldDisableThinking && { thinking: { type: 'disabled' } }),
       }),
       signal: AbortSignal.timeout(15_000),
     })
@@ -96,9 +113,23 @@ export async function generateTitle(conversationText: string): Promise<string | 
   }
 }
 
+async function shouldDisableThinkingForTitle(presetId: string): Promise<boolean> {
+  const settings = await new SettingsService().getUserSettings()
+  if (settings.alwaysThinkingEnabled !== false) return false
+
+  const presetEnv = PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.defaultEnv
+  return isEnvTruthy(presetEnv?.CC_HAHA_SEND_DISABLED_THINKING)
+}
+
 /**
  * Persist an AI-generated title to the session's JSONL file.
+ * Returns false when a user custom title exists, because custom titles are
+ * intentional and must not be replaced by automatic title refreshes.
  */
-export async function saveAiTitle(sessionId: string, title: string): Promise<void> {
+export async function saveAiTitle(sessionId: string, title: string): Promise<boolean> {
+  if (await sessionService.getCustomTitle(sessionId)) {
+    return false
+  }
   await sessionService.appendAiTitle(sessionId, title)
+  return true
 }

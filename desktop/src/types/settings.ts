@@ -4,6 +4,13 @@ export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermiss
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
 export type ThemeMode = 'light' | 'dark'
+export type WebSearchMode = 'auto' | 'anthropic' | 'tavily' | 'brave' | 'disabled'
+
+export type WebSearchSettings = {
+  mode?: WebSearchMode
+  tavilyApiKey?: string
+  braveApiKey?: string
+}
 
 export type ModelInfo = {
   id: string
@@ -16,8 +23,10 @@ export type UserSettings = {
   model?: string
   modelContext?: string
   effort?: EffortLevel
+  alwaysThinkingEnabled?: boolean
   permissionMode?: PermissionMode
   theme?: ThemeMode
   skipWebFetchPreflight?: boolean
+  webSearch?: WebSearchSettings
   [key: string]: unknown
 }

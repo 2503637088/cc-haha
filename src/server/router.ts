@@ -14,9 +14,12 @@ import { handleTeamsApi } from './api/teams.js'
 import { handleFilesystemRoute } from './api/filesystem.js'
 import { handleProvidersApi } from './api/providers.js'
 import { handleAdaptersApi } from './api/adapters.js'
+import { handlePluginsApi } from './api/plugins.js'
 import { handleSkillsApi } from './api/skills.js'
 import { handleComputerUseApi } from './api/computer-use.js'
 import { handleHahaOAuthApi } from './api/haha-oauth.js'
+import { handleMcpApi } from './api/mcp.js'
+import { handleDiagnosticsApi } from './api/diagnostics.js'
 
 export async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const path = url.pathname
@@ -76,8 +79,17 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     case 'skills':
       return handleSkillsApi(req, url, segments)
 
+    case 'mcp':
+      return handleMcpApi(req, url, segments)
+
+    case 'plugins':
+      return handlePluginsApi(req, url, segments)
+
     case 'computer-use':
       return handleComputerUseApi(req, url, segments)
+
+    case 'diagnostics':
+      return handleDiagnosticsApi(req, url, segments)
 
     case 'filesystem':
       return handleFilesystemRoute(url.pathname, url)

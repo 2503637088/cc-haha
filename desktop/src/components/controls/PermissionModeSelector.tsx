@@ -18,13 +18,14 @@ const MODE_ICONS: Record<PermissionMode, string> = {
 
 type Props = {
   workDir?: string
+  compact?: boolean
   /** Controlled mode: override current value */
   value?: PermissionMode
   /** Controlled mode: called on change instead of updating global store */
   onChange?: (mode: PermissionMode) => void
 }
 
-export function PermissionModeSelector({ workDir: workDirProp, value, onChange }: Props = {}) {
+export function PermissionModeSelector({ workDir: workDirProp, compact = false, value, onChange }: Props = {}) {
   const t = useTranslation()
   const { permissionMode: storeMode, setPermissionMode } = useSettingsStore()
   const setSessionPermissionMode = useChatStore((s) => s.setSessionPermissionMode)
@@ -104,11 +105,20 @@ export function PermissionModeSelector({ workDir: workDirProp, value, onChange }
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[var(--color-surface-container-low)] hover:bg-[var(--color-surface-hover)] rounded-full text-xs font-medium text-[var(--color-text-secondary)] transition-colors"
+        title={compact ? MODE_LABELS[currentMode] : undefined}
+        className={`flex items-center bg-[var(--color-surface-container-low)] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] ${
+          compact
+            ? 'h-8 w-8 justify-center rounded-full p-0'
+            : 'gap-1.5 rounded-full px-2.5 py-1.5 text-xs'
+        }`}
       >
         <span className="material-symbols-outlined text-[14px]">{MODE_ICONS[currentMode]}</span>
-        <span>{MODE_LABELS[currentMode]}</span>
-        <span className="material-symbols-outlined text-[12px]">expand_more</span>
+        {!compact && (
+          <>
+            <span>{MODE_LABELS[currentMode]}</span>
+            <span className="material-symbols-outlined text-[12px]">expand_more</span>
+          </>
+        )}
       </button>
 
       {open && (
