@@ -9,6 +9,8 @@ export type ModelMapping = {
   opus: string
 }
 
+export type ModelContextWindows = Record<string, number>
+
 export type SavedProvider = {
   id: string
   presetId: string
@@ -17,6 +19,8 @@ export type SavedProvider = {
   baseUrl: string
   apiFormat: ApiFormat
   models: ModelMapping
+  autoCompactWindow?: number
+  modelContextWindows?: ModelContextWindows
   notes?: string
 }
 
@@ -27,6 +31,8 @@ export type CreateProviderInput = {
   baseUrl: string
   apiFormat?: ApiFormat
   models: ModelMapping
+  autoCompactWindow?: number
+  modelContextWindows?: ModelContextWindows
   notes?: string
 }
 
@@ -36,6 +42,8 @@ export type UpdateProviderInput = {
   baseUrl?: string
   apiFormat?: ApiFormat
   models?: ModelMapping
+  autoCompactWindow?: number | null
+  modelContextWindows?: ModelContextWindows | null
   notes?: string
 }
 

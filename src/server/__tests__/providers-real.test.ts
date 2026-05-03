@@ -68,6 +68,10 @@ describe('Real Provider Configs', () => {
     expect((settings.env as Record<string, string>).ANTHROPIC_BASE_URL).toBe('https://api.minimaxi.com/anthropic')
     expect((settings.env as Record<string, string>).ANTHROPIC_API_KEY).toBe('sk-fake-test-key-for-testing-only')
     expect((settings.env as Record<string, string>).ANTHROPIC_MODEL).toBe('MiniMax-M2.7-highspeed')
+    expect(JSON.parse((settings.env as Record<string, string>).CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
+      'MiniMax-M2.7': 204800,
+      'MiniMax-M2.7-highspeed': 204800,
+    })
 
     // 验证原版 settings.json 没有被创建
     expect(await originalSettingsExists()).toBe(false)
@@ -101,6 +105,10 @@ describe('Real Provider Configs', () => {
     await service.activateProvider(minimax.id)
     let settings = await readCcHahaSettings()
     expect((settings.env as Record<string, string>).ANTHROPIC_BASE_URL).toBe('https://api.minimaxi.com/anthropic')
+    expect(JSON.parse((settings.env as Record<string, string>).CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
+      'MiniMax-M2.7': 204800,
+      'MiniMax-M2.7-highspeed': 204800,
+    })
 
     // 切换到接口AI中转站
     await service.activateProvider(jiekou.id)
@@ -108,6 +116,7 @@ describe('Real Provider Configs', () => {
     expect((settings.env as Record<string, string>).ANTHROPIC_BASE_URL).toBe('https://api.jiekou.ai/anthropic')
     expect((settings.env as Record<string, string>).ANTHROPIC_API_KEY).toBe('sk-fake-test-key-for-testing-only')
     expect((settings.env as Record<string, string>).ANTHROPIC_MODEL).toBe('claude-opus-4-7')
+    expect((settings.env as Record<string, string>).CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
 
     // 验证 activeId 正确
     const list = await service.listProviders()

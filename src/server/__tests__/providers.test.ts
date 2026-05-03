@@ -153,6 +153,28 @@ describe('ProviderService', () => {
 
       expect(provider.notes).toBe('dev environment')
     })
+
+    test('should preserve optional auto compact window', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput({ autoCompactWindow: 64000 }))
+
+      expect(provider.autoCompactWindow).toBe(64000)
+    })
+
+    test('should preserve optional model context windows', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput({
+        modelContextWindows: {
+          'model-main': 300000,
+          'model-haiku': 128000,
+        },
+      }))
+
+      expect(provider.modelContextWindows).toEqual({
+        'model-main': 300000,
+        'model-haiku': 128000,
+      })
+    })
   })
 
   // ─── getProvider ─────────────────────────────────────────────────────────
@@ -225,6 +247,58 @@ describe('ProviderService', () => {
       expect(env.ANTHROPIC_BASE_URL).toBe('https://new-api.example.com')
       expect(env.ANTHROPIC_API_KEY).toBe('sk-new-key')
       expect(env.ANTHROPIC_MODEL).toBe('model-main')
+    })
+
+    test('updating active provider should override and clear auto compact window', async () => {
+      const svc = new ProviderService()
+      const added = await svc.addProvider(sampleInput({ autoCompactWindow: 64000 }))
+      await svc.activateProvider(added.id)
+
+      let settings = await readSettings()
+      let env = settings.env as Record<string, string>
+      expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('64000')
+
+      await svc.updateProvider(added.id, { autoCompactWindow: 32000 })
+
+      settings = await readSettings()
+      env = settings.env as Record<string, string>
+      expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('32000')
+
+      await svc.updateProvider(added.id, { autoCompactWindow: null })
+
+      settings = await readSettings()
+      env = settings.env as Record<string, string>
+      expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+    })
+
+    test('updating active provider should override and clear model context windows', async () => {
+      const svc = new ProviderService()
+      const added = await svc.addProvider(sampleInput({
+        modelContextWindows: { 'model-main': 300000 },
+      }))
+      await svc.activateProvider(added.id)
+
+      let settings = await readSettings()
+      let env = settings.env as Record<string, string>
+      expect(JSON.parse(env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toEqual({
+        'model-main': 300000,
+      })
+
+      await svc.updateProvider(added.id, {
+        modelContextWindows: { 'model-main': 500000 },
+      })
+
+      settings = await readSettings()
+      env = settings.env as Record<string, string>
+      expect(JSON.parse(env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toEqual({
+        'model-main': 500000,
+      })
+
+      await svc.updateProvider(added.id, { modelContextWindows: null })
+
+      settings = await readSettings()
+      env = settings.env as Record<string, string>
+      expect(env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS).toBeUndefined()
     })
   })
 
@@ -315,6 +389,7 @@ describe('ProviderService', () => {
       expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('model-haiku')
       expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('model-sonnet')
       expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('model-opus')
+      expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
     })
 
     test('should include preset default env on activation and runtime env', async () => {
@@ -330,16 +405,47 @@ describe('ProviderService', () => {
       const env = settings.env as Record<string, string>
       expect(env.API_TIMEOUT_MS).toBe('3000000')
       expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1')
+      expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+      expect(JSON.parse(env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toEqual({
+        'anthropic/claude-sonnet-4.6': 200000,
+        'anthropic/claude-haiku-4.5:thinking': 200000,
+        'anthropic/claude-opus-4.7': 1000000,
+      })
 
       const runtimeEnv = await svc.getProviderRuntimeEnv(provider.id)
       expect(runtimeEnv.API_TIMEOUT_MS).toBe('3000000')
       expect(runtimeEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1')
+      expect(runtimeEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+      expect(JSON.parse(runtimeEnv.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toEqual({
+        'anthropic/claude-sonnet-4.6': 200000,
+        'anthropic/claude-haiku-4.5:thinking': 200000,
+        'anthropic/claude-opus-4.7': 1000000,
+      })
 
       await svc.activateOfficial()
       const clearedSettings = await readSettings()
       const clearedEnv = (clearedSettings.env as Record<string, string> | undefined) ?? {}
       expect(clearedEnv.API_TIMEOUT_MS).toBeUndefined()
       expect(clearedEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBeUndefined()
+      expect(clearedEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+      expect(clearedEnv.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS).toBeUndefined()
+    })
+
+    test('provider auto compact window should override preset default env on activation and runtime env', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput({
+        presetId: 'custom',
+        autoCompactWindow: 32000,
+      }))
+
+      await svc.activateProvider(provider.id)
+
+      const settings = await readSettings()
+      const env = settings.env as Record<string, string>
+      expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('32000')
+
+      const runtimeEnv = await svc.getProviderRuntimeEnv(provider.id)
+      expect(runtimeEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('32000')
     })
 
     test('should preserve existing settings.json fields on activation', async () => {
@@ -452,6 +558,7 @@ describe('Providers API', () => {
       baseUrl: 'https://api.example.com',
       apiKey: 'sk-test',
       apiFormat: 'anthropic',
+      autoCompactWindow: 64000,
       models: {
         main: 'gpt-4',
         haiku: 'gpt-4-haiku',
@@ -462,14 +569,35 @@ describe('Providers API', () => {
     const res = await handleProvidersApi(req, url, segments)
 
     expect(res.status).toBe(201)
-    const body = (await res.json()) as { provider: { name: string; models: { main: string } } }
+    const body = (await res.json()) as { provider: { name: string; models: { main: string }; autoCompactWindow: number } }
     expect(body.provider.name).toBe('New Provider')
     expect(body.provider.models.main).toBe('gpt-4')
+    expect(body.provider.autoCompactWindow).toBe(64000)
   })
 
   test('POST /api/providers should return 400 for invalid input', async () => {
     const { req, url, segments } = makeRequest('POST', '/api/providers', {
       name: '', // invalid: empty name
+    })
+    const res = await handleProvidersApi(req, url, segments)
+
+    expect(res.status).toBe(400)
+  })
+
+  test('POST /api/providers should return 400 for invalid auto compact window', async () => {
+    const { req, url, segments } = makeRequest('POST', '/api/providers', {
+      presetId: 'custom',
+      name: 'New Provider',
+      baseUrl: 'https://api.example.com',
+      apiKey: 'sk-test',
+      apiFormat: 'anthropic',
+      autoCompactWindow: 8000,
+      models: {
+        main: 'gpt-4',
+        haiku: 'gpt-4-haiku',
+        sonnet: 'gpt-4-sonnet',
+        opus: 'gpt-4-opus',
+      },
     })
     const res = await handleProvidersApi(req, url, segments)
 

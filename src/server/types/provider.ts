@@ -21,6 +21,12 @@ export const ModelMappingSchema = z.object({
   opus: z.string(),
 })
 
+export const AutoCompactWindowSchema = z.number().int().min(16000).max(10000000)
+export const ModelContextWindowsSchema = z.record(
+  z.string().min(1),
+  z.number().int().min(16000).max(10000000),
+)
+
 export const SavedProviderSchema = z.object({
   id: z.string(),
   presetId: z.string(),
@@ -29,6 +35,8 @@ export const SavedProviderSchema = z.object({
   baseUrl: z.string(),
   apiFormat: ApiFormatSchema.default('anthropic'),
   models: ModelMappingSchema,
+  autoCompactWindow: AutoCompactWindowSchema.optional(),
+  modelContextWindows: ModelContextWindowsSchema.optional(),
   notes: z.string().optional(),
 })
 
@@ -44,6 +52,8 @@ export const CreateProviderSchema = z.object({
   baseUrl: z.string(),
   apiFormat: ApiFormatSchema.default('anthropic'),
   models: ModelMappingSchema,
+  autoCompactWindow: AutoCompactWindowSchema.optional(),
+  modelContextWindows: ModelContextWindowsSchema.optional(),
   notes: z.string().optional(),
 })
 
@@ -53,6 +63,8 @@ export const UpdateProviderSchema = z.object({
   baseUrl: z.string().optional(),
   apiFormat: ApiFormatSchema.optional(),
   models: ModelMappingSchema.optional(),
+  autoCompactWindow: AutoCompactWindowSchema.nullable().optional(),
+  modelContextWindows: ModelContextWindowsSchema.nullable().optional(),
   notes: z.string().optional(),
 })
 

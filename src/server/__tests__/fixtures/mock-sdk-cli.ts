@@ -120,6 +120,31 @@ ws.addEventListener('message', (event) => {
           })
           continue
         }
+        if (text.includes('trigger api error')) {
+          emit(ws, {
+            type: 'assistant',
+            error: 'invalid_request',
+            isApiErrorMessage: true,
+            message: {
+              role: 'assistant',
+              content: [{ type: 'text', text: 'Prompt is too long' }],
+            },
+            session_id: sessionId,
+          })
+          if (text.includes('then exit')) {
+            setTimeout(() => process.exit(1), 10)
+            continue
+          }
+          emit(ws, {
+            type: 'result',
+            subtype: 'success',
+            is_error: true,
+            result: 'Prompt is too long',
+            usage: { input_tokens: 0, output_tokens: 0 },
+            session_id: sessionId,
+          })
+          continue
+        }
         emit(ws, {
           type: 'stream_event',
           event: { type: 'message_start' },

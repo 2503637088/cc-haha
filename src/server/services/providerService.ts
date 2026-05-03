@@ -16,6 +16,7 @@ import { openaiChatToAnthropic } from '../proxy/transform/openaiChatToAnthropic.
 import { openaiResponsesToAnthropic } from '../proxy/transform/openaiResponsesToAnthropic.js'
 import type { AnthropicRequest, AnthropicResponse } from '../proxy/transform/types.js'
 import { PROVIDER_PRESETS } from '../config/providerPresets.js'
+import { MODEL_CONTEXT_WINDOWS_ENV_KEY } from '../../utils/model/modelContextWindows.js'
 import type {
   SavedProvider,
   ProvidersIndex,
@@ -38,12 +39,18 @@ const MANAGED_ENV_KEYS = [
   'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+  MODEL_CONTEXT_WINDOWS_ENV_KEY,
 ] as const
 
 const DEFAULT_INDEX: ProvidersIndex = { activeId: null, providers: [] }
 
 function getPresetDefaultEnv(presetId: string): Record<string, string> {
   return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.defaultEnv ?? {}
+}
+
+function getPresetModelContextWindows(presetId: string): Record<string, number> {
+  return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.modelContextWindows ?? {}
 }
 
 function getManagedEnvKeys(): string[] {
@@ -168,6 +175,8 @@ export class ProviderService {
       baseUrl: input.baseUrl,
       apiFormat: input.apiFormat ?? 'anthropic',
       models: input.models,
+      ...(input.autoCompactWindow !== undefined && { autoCompactWindow: input.autoCompactWindow }),
+      ...(input.modelContextWindows !== undefined && { modelContextWindows: input.modelContextWindows }),
       ...(input.notes !== undefined && { notes: input.notes }),
     }
 
@@ -189,7 +198,15 @@ export class ProviderService {
       ...(input.baseUrl !== undefined && { baseUrl: input.baseUrl }),
       ...(input.apiFormat !== undefined && { apiFormat: input.apiFormat }),
       ...(input.models !== undefined && { models: input.models }),
+      ...(typeof input.autoCompactWindow === 'number' && { autoCompactWindow: input.autoCompactWindow }),
+      ...(input.modelContextWindows !== undefined && input.modelContextWindows !== null && { modelContextWindows: input.modelContextWindows }),
       ...(input.notes !== undefined && { notes: input.notes }),
+    }
+    if (input.autoCompactWindow === null) {
+      delete updated.autoCompactWindow
+    }
+    if (input.modelContextWindows === null) {
+      delete updated.modelContextWindows
     }
 
     index.providers[idx] = updated
@@ -251,8 +268,19 @@ export class ProviderService {
       ? `http://127.0.0.1:${ProviderService.serverPort}${proxyPath}`
       : provider.baseUrl
 
+    const modelContextWindows = {
+      ...getPresetModelContextWindows(provider.presetId),
+      ...(provider.modelContextWindows ?? {}),
+    }
+
     return {
       ...getPresetDefaultEnv(provider.presetId),
+      ...(provider.autoCompactWindow !== undefined && {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(provider.autoCompactWindow),
+      }),
+      ...(Object.keys(modelContextWindows).length > 0 && {
+        [MODEL_CONTEXT_WINDOWS_ENV_KEY]: JSON.stringify(modelContextWindows),
+      }),
       ANTHROPIC_BASE_URL: baseUrl,
       ANTHROPIC_API_KEY: needsProxy ? 'proxy-managed' : provider.apiKey,
       ANTHROPIC_MODEL: provider.models.main,

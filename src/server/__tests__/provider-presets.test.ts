@@ -89,6 +89,7 @@ describe('provider presets API', () => {
     expect(kimi?.defaultModels.main).toBe('kimi-k2.6')
     expect(kimi?.defaultEnv?.CC_HAHA_SEND_DISABLED_THINKING).toBe('1')
     expect(minimax?.defaultModels.main).toBe('MiniMax-M2.7')
+    expect(minimax?.modelContextWindows?.['MiniMax-M2.7']).toBe(204800)
     expect(jiekouai?.baseUrl).toBe('https://api.jiekou.ai/anthropic')
     expect(jiekouai?.defaultModels.main).toBe('claude-sonnet-4-6')
     expect(jiekouai?.defaultModels.opus).toBe('claude-opus-4-7')
@@ -112,16 +113,25 @@ describe('provider presets API', () => {
     expect(lmstudio?.needsApiKey).toBe(false)
     expect(lmstudio?.promoText).toContain('http://localhost:1234')
     expect(lmstudio?.promoText).toContain('200K')
-    expect(lmstudio?.defaultEnv).toEqual({ ANTHROPIC_AUTH_TOKEN: 'lmstudio' })
+    expect(lmstudio?.defaultEnv).toEqual({
+      ANTHROPIC_AUTH_TOKEN: 'lmstudio',
+    })
     expect(ollama?.needsApiKey).toBe(false)
     expect(ollama?.promoText).toContain('http://localhost:11434')
     expect(ollama?.promoText).toContain('200K')
-    expect(ollama?.defaultEnv).toEqual({ ANTHROPIC_AUTH_TOKEN: 'ollama' })
+    expect(ollama?.defaultEnv).toEqual({
+      ANTHROPIC_AUTH_TOKEN: 'ollama',
+    })
     expect(deepseek?.apiKeyUrl).toBe('https://platform.deepseek.com/api_keys')
+    expect(deepseek?.modelContextWindows?.['deepseek-v4-pro']).toBe(1000000)
+    expect(deepseek?.modelContextWindows?.['deepseek-v4-flash']).toBe(1000000)
     expect(zhipu?.apiKeyUrl).toBe('https://www.bigmodel.cn/invite?icode=d41B2qi8Z5xNwTGLNPPF3OZLO2QH3C0EBTSr%2BArzMw4%3D')
     expect(zhipu?.promoText).toContain('cc-haha')
     expect(zhipu?.defaultEnv?.CC_HAHA_SEND_DISABLED_THINKING).toBe('1')
+    expect(zhipu?.modelContextWindows?.['glm-5.1']).toBe(200000)
+    expect(zhipu?.modelContextWindows?.['glm-4.5-air']).toBe(128000)
     expect(kimi?.apiKeyUrl).toBe('https://platform.kimi.com/console/api-keys')
+    expect(kimi?.modelContextWindows?.['kimi-k2.6']).toBe(262144)
     expect(minimax?.apiKeyUrl).toBe('https://platform.minimaxi.com/subscribe/token-plan?code=1TG2Cseab2&source=link')
     expect(jiekouai?.apiKeyUrl).toBe('https://jiekou.ai/referral?invited_code=OBNU3K')
     expect(jiekouai?.promoText).toContain('官方 8 折')
@@ -134,7 +144,9 @@ describe('provider presets API', () => {
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
     })
+    expect(shengsuanyun?.modelContextWindows?.['anthropic/claude-opus-4.7']).toBe(1000000)
     expect(custom?.promoText).toBeUndefined()
+    expect(custom?.defaultEnv).toBeUndefined()
   })
 
   test('GET and PUT /api/providers/settings read and write cc-haha settings.json', async () => {

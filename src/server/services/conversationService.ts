@@ -499,6 +499,16 @@ export class ConversationService {
         if (session.sdkMessages.length > 40) {
           session.sdkMessages.splice(0, 20)
         }
+        const sdkError = this.extractSdkErrorEvent(msg)
+        if (sdkError) {
+          void diagnosticsService.recordEvent({
+            type: sdkError.type,
+            severity: 'error',
+            sessionId,
+            summary: sdkError.summary,
+            details: sdkError.details,
+          })
+        }
         if (msg?.type === 'system' && msg.subtype === 'init') {
           session.initMessage = msg
         }
@@ -724,6 +734,8 @@ export class ConversationService {
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
       'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
       'CC_HAHA_SEND_DISABLED_THINKING',
+      'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+      'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS',
     ] as const
 
     const cleanEnv = { ...process.env }
@@ -848,6 +860,8 @@ export class ConversationService {
         'ANTHROPIC_DEFAULT_OPUS_MODEL',
         'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
         'CC_HAHA_SEND_DISABLED_THINKING',
+        'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+        'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS',
       ].some((key) => typeof env[key] === 'string' && env[key]!.trim().length > 0)
     } catch {
       return false
@@ -942,11 +956,15 @@ export class ConversationService {
     const resultMessage = [...recentMessages]
       .reverse()
       .find((msg) => msg?.type === 'result' && msg.is_error)
+    const assistantApiError = [...recentMessages]
+      .reverse()
+      .find((msg) => this.isAssistantApiErrorMessage(msg))
     const authStatus = [...recentMessages]
       .reverse()
       .find((msg) => msg?.type === 'auth_status')
     const detail =
       this.extractStartupDetail(resultMessage) ||
+      this.extractAssistantApiErrorDetail(assistantApiError) ||
       this.extractStartupDetail(authStatus) ||
       capturedOutput
 
@@ -986,11 +1004,15 @@ export class ConversationService {
     const resultMessage = [...recentMessages]
       .reverse()
       .find((msg) => msg?.type === 'result' && msg.is_error)
+    const assistantApiError = [...recentMessages]
+      .reverse()
+      .find((msg) => this.isAssistantApiErrorMessage(msg))
     const authStatus = [...recentMessages]
       .reverse()
       .find((msg) => msg?.type === 'auth_status')
     const detail =
       this.extractStartupDetail(resultMessage) ||
+      this.extractAssistantApiErrorDetail(assistantApiError) ||
       this.extractStartupDetail(authStatus) ||
       capturedOutput
 
@@ -1035,6 +1057,77 @@ export class ConversationService {
     }
 
     return ''
+  }
+
+  private isAssistantApiErrorMessage(message: any): boolean {
+    return (
+      message?.type === 'assistant' &&
+      (message.isApiErrorMessage === true || typeof message.error === 'string')
+    )
+  }
+
+  private extractAssistantApiErrorDetail(message: any): string {
+    if (!this.isAssistantApiErrorMessage(message)) return ''
+
+    const text = this.extractAssistantText(message)
+    const error = typeof message.error === 'string' ? message.error : ''
+    if (text && error) return `${error}: ${text}`
+    return text || error
+  }
+
+  private extractAssistantText(message: any): string {
+    const content = message?.message?.content
+    if (!Array.isArray(content)) return ''
+    const textBlock = content.find(
+      (block: unknown): block is { type: string; text: string } =>
+        !!block &&
+        typeof block === 'object' &&
+        (block as { type?: unknown }).type === 'text' &&
+        typeof (block as { text?: unknown }).text === 'string',
+    )
+    return textBlock?.text || ''
+  }
+
+  private extractSdkErrorEvent(message: any): {
+    type: string
+    summary: string
+    details: Record<string, unknown>
+  } | null {
+    if (this.isAssistantApiErrorMessage(message)) {
+      const summary = this.redactProcessOutput(
+        this.extractAssistantApiErrorDetail(message) || 'Assistant API error',
+      )
+      return {
+        type: 'sdk_api_error',
+        summary,
+        details: {
+          sdkType: message.type,
+          error: typeof message.error === 'string' ? message.error : undefined,
+          isApiErrorMessage: message.isApiErrorMessage === true,
+          errorDetails:
+            typeof message.errorDetails === 'string'
+              ? this.redactProcessOutput(message.errorDetails)
+              : undefined,
+        },
+      }
+    }
+
+    if (message?.type === 'result' && message.is_error) {
+      const summary = this.redactProcessOutput(
+        this.extractStartupDetail(message) || 'SDK result error',
+      )
+      return {
+        type: 'sdk_result_error',
+        summary,
+        details: {
+          sdkType: message.type,
+          subtype: message.subtype,
+          isError: true,
+        },
+      }
+    }
+
+    return null
   }
 
   private summarizeSdkMessages(messages: any[]): unknown[] {

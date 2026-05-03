@@ -19,4 +19,5 @@ export type ProviderPreset = {
   promoText?: string
   featured?: boolean
   defaultEnv?: Record<string, string>
+  modelContextWindows?: Record<string, number>
 }

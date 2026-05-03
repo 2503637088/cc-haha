@@ -29,6 +29,12 @@
     "apiKeyUrl": "https://platform.deepseek.com/api_keys",
     "defaultEnv": {
       "CC_HAHA_SEND_DISABLED_THINKING": "1"
+    },
+    "modelContextWindows": {
+      "deepseek-v4-pro": 1000000,
+      "deepseek-v4-flash": 1000000,
+      "deepseek-chat": 1000000,
+      "deepseek-reasoner": 1000000
     }
   },
   {
@@ -48,6 +54,11 @@
     "promoText": "智谱 GLM 为 cc-haha 用户准备了专属邀请福利，使用此链接注册后可领取新用户权益。",
     "defaultEnv": {
       "CC_HAHA_SEND_DISABLED_THINKING": "1"
+    },
+    "modelContextWindows": {
+      "glm-5.1": 200000,
+      "glm-5-turbo": 200000,
+      "glm-4.5-air": 128000
     }
   },
   {
@@ -66,6 +77,14 @@
     "apiKeyUrl": "https://platform.kimi.com/console/api-keys",
     "defaultEnv": {
       "CC_HAHA_SEND_DISABLED_THINKING": "1"
+    },
+    "modelContextWindows": {
+      "kimi-k2.6": 262144,
+      "kimi-k2.5": 262144,
+      "kimi-k2-0905-preview": 262144,
+      "kimi-k2-turbo-preview": 262144,
+      "kimi-k2-thinking": 262144,
+      "kimi-k2-thinking-turbo": 262144
     }
   },
   {
@@ -81,7 +100,16 @@
     },
     "needsApiKey": true,
     "websiteUrl": "https://platform.minimaxi.com",
-    "apiKeyUrl": "https://platform.minimaxi.com/subscribe/token-plan?code=1TG2Cseab2&source=link"
+    "apiKeyUrl": "https://platform.minimaxi.com/subscribe/token-plan?code=1TG2Cseab2&source=link",
+    "modelContextWindows": {
+      "MiniMax-M2.7": 204800,
+      "MiniMax-M2.7-highspeed": 204800,
+      "MiniMax-M2.5": 204800,
+      "MiniMax-M2.5-highspeed": 204800,
+      "MiniMax-M2.1": 204800,
+      "MiniMax-M2.1-highspeed": 204800,
+      "MiniMax-M2": 204800
+    }
   },
   {
     "id": "jiekouai",
@@ -101,6 +129,12 @@
     "featured": true,
     "defaultEnv": {
       "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "none"
+    },
+    "modelContextWindows": {
+      "claude-sonnet-4-6": 200000,
+      "claude-haiku-4-5-20251001": 200000,
+      "claude-haiku-4-5": 200000,
+      "claude-opus-4-7": 1000000
     }
   },
   {
@@ -123,6 +157,11 @@
       "API_TIMEOUT_MS": "3000000",
       "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
       "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "none"
+    },
+    "modelContextWindows": {
+      "anthropic/claude-sonnet-4.6": 200000,
+      "anthropic/claude-haiku-4.5:thinking": 200000,
+      "anthropic/claude-opus-4.7": 1000000
     }
   },
   {

@@ -25,6 +25,10 @@ const ProviderPresetSchema = z.object({
   promoText: z.string().optional(),
   featured: z.boolean().optional(),
   defaultEnv: z.record(z.string(), z.string()).optional(),
+  modelContextWindows: z.record(
+    z.string().min(1),
+    z.number().int().min(16000).max(10000000),
+  ).optional(),
 })
 
 const ProviderPresetsSchema = z.array(ProviderPresetSchema)

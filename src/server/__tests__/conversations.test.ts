@@ -837,6 +837,38 @@ describe('WebSocket Chat Integration', () => {
     expect(messages.at(-1)?.type).toBe('message_complete')
   }, 15_000)
 
+  it('should not duplicate SDK API errors with the final error result', async () => {
+    const messages = await runTurnUntilComplete(
+      `chat-api-error-${crypto.randomUUID()}`,
+      'trigger api error',
+    )
+
+    const errors = messages.filter((m) => m.type === 'error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatchObject({
+      code: 'invalid_request',
+      message: 'Prompt is too long',
+    })
+    expect(messages.some((m) => m.type === 'message_complete')).toBe(true)
+    expect(messages.at(-1)?.type).toBe('message_complete')
+  }, 15_000)
+
+  it('should not add a CLI exit error after a reported SDK API error', async () => {
+    const messages = await runTurnUntilComplete(
+      `chat-api-error-exit-${crypto.randomUUID()}`,
+      'trigger api error then exit',
+    )
+
+    const errors = messages.filter((m) => m.type === 'error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatchObject({
+      code: 'invalid_request',
+      message: 'Prompt is too long',
+    })
+    expect(messages.some((m) => m.type === 'message_complete')).toBe(true)
+    expect(messages.at(-1)?.type).toBe('message_complete')
+  }, 15_000)
+
   it('should handle permission_response without error', async () => {
     const messages: any[] = []
     const ws = new WebSocket(`${wsUrl}/ws/chat-test-4`)

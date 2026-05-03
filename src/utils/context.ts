@@ -4,6 +4,7 @@ import { getGlobalConfig } from './config.js'
 import { isEnvTruthy } from './envUtils.js'
 import { getCanonicalName } from './model/model.js'
 import { getModelCapability } from './model/modelCapabilities.js'
+import { getConfiguredOrBuiltInModelContextWindow } from './model/modelContextWindows.js'
 
 // Model context window size (200k tokens for all models right now)
 export const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
@@ -36,7 +37,7 @@ export function has1mContext(model: string): boolean {
   if (is1mContextDisabled()) {
     return false
   }
-  return /\[1m\]/i.test(model)
+  return /\[1m\]/i.test(model) || /:1m$/i.test(model)
 }
 
 // @[MODEL LAUNCH]: Update this pattern if the new model supports 1M context
@@ -69,6 +70,17 @@ export function getContextWindowForModel(
   // [1m] suffix — explicit client-side opt-in, respected over all detection
   if (has1mContext(model)) {
     return 1_000_000
+  }
+
+  const configuredWindow = getConfiguredOrBuiltInModelContextWindow(model)
+  if (configuredWindow !== undefined) {
+    if (
+      configuredWindow > MODEL_CONTEXT_WINDOW_DEFAULT &&
+      is1mContextDisabled()
+    ) {
+      return MODEL_CONTEXT_WINDOW_DEFAULT
+    }
+    return configuredWindow
   }
 
   const cap = getModelCapability(model)
