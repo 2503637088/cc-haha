@@ -17,7 +17,7 @@
 
 </div>
 
-A **locally runnable version** repaired from the leaked Claude Code source, with support for any Anthropic-compatible API endpoint (MiniMax, OpenRouter, etc.). Beyond the full TUI, we've also completed Computer Use (macOS / Windows), built a GUI **desktop app**, and enabled **full remote control** via Telegram / Feishu.
+A **locally runnable version** repaired from the leaked Claude Code source, with support for any Anthropic-compatible API endpoint (MiniMax, OpenRouter, etc.). Beyond the full TUI, we've also completed Computer Use (macOS / Windows), built a GUI **desktop app**, and enabled **full remote control** via Telegram / Feishu / WeChat / DingTalk.
 
 <p align="center">
   <a href="#desktop-preview">Desktop</a> · <a href="#features">Features</a> · <a href="#architecture-overview">Architecture</a> · <a href="#quick-start">Quick Start</a> · <a href="docs/en/guide/env-vars.md">Env Vars</a> · <a href="docs/en/guide/faq.md">FAQ</a> · <a href="docs/en/guide/global-usage.md">Global Usage</a> · <a href="#more-documentation">More Docs</a>
@@ -44,7 +44,7 @@ The Claude Code Haha desktop app brings sessions, multi-project navigation, code
   <tr>
     <td align="center" width="33%"><img src="docs/images/desktop_ui/05_settings.png" alt="Provider Settings"><br><b>Multi-Provider Management</b></td>
     <td align="center" width="33%"><img src="docs/images/desktop_ui/08_scheduled_task.png" alt="Scheduled Tasks"><br><b>Scheduled Tasks</b></td>
-    <td align="center" width="33%"><img src="docs/images/desktop_ui/07_im.png" alt="IM Adapters"><br><b>IM Adapters (Telegram / Feishu)</b></td>
+    <td align="center" width="33%"><img src="docs/images/desktop_ui/07_im.png" alt="IM Adapters"><br><b>IM Adapters (Telegram / Feishu / WeChat / DingTalk)</b></td>
   </tr>
 </table>
 
@@ -59,7 +59,7 @@ The Claude Code Haha desktop app brings sessions, multi-project navigation, code
 - **Memory System** (cross-session persistent memory) — [Usage Guide](docs/memory/01-usage-guide.md)
 - **Multi-Agent System** (agent orchestration, parallel tasks, Teams collaboration) — [Usage Guide](docs/agent/01-usage-guide.md) | [Implementation](docs/agent/02-implementation.md)
 - **Skills System** (extensible capability plugins, custom workflows) — [Usage Guide](docs/skills/01-usage-guide.md) | [Implementation](docs/skills/02-implementation.md)
-- **Channel System** (remote Agent control via Telegram/Feishu/Discord IM platforms) — [Architecture](docs/en/channel/01-channel-system.md)
+- **IM Integration** (remote chat, project switching, and permission approval via Telegram / Feishu / WeChat / DingTalk) — [Guide](docs/im/)
 - **Computer Use desktop control** — [Guide](docs/en/features/computer-use.md) | [Architecture](docs/en/features/computer-use-architecture.md)
 - **Desktop App** (Tauri 2 + React GUI client, multi-tab multi-session) — [Docs](docs/desktop/)
 - Fallback Recovery CLI mode (`CLAUDE_CODE_FORCE_RECOVERY_CLI=1 ./bin/claude-haha`)
@@ -264,7 +264,7 @@ If this project helps you, consider buying me a coffee — every bit of support 
 | [Memory System](docs/memory/01-usage-guide.md) | Cross-session persistent memory usage and implementation |
 | [Multi-Agent System](docs/agent/01-usage-guide.md) | Agent orchestration, parallel tasks and Teams collaboration |
 | [Skills System](docs/skills/01-usage-guide.md) | Extensible capability plugins, custom workflows and conditional activation |
-| [Channel System](docs/en/channel/01-channel-system.md) | Remote Agent control via Telegram/Feishu/Discord IM platforms |
+| [IM Integration](docs/im/) | Remote chat, project switching, and permission approval via Telegram / Feishu / WeChat / DingTalk |
 | [Computer Use](docs/en/features/computer-use.md) | Desktop control (screenshots, mouse, keyboard) — [Architecture](docs/en/features/computer-use-architecture.md) |
 | [Desktop App](docs/desktop/) | Tauri 2 + React GUI client — [Quick Start](docs/desktop/01-quick-start.md) \| [Architecture](docs/desktop/02-architecture.md) \| [Installation](docs/desktop/04-installation.md) |
 | [Global Usage](docs/en/guide/global-usage.md) | Run claude-haha from any directory |
