@@ -199,6 +199,18 @@ export function RepositoryLaunchControls({
     return null
   }, [context, selectedBranch, t, useWorktree])
 
+  const requiresIsolation = useMemo(() => {
+    if (context?.state !== 'ok' || !selectedBranch) return false
+    if (selectedBranch.name === context.currentBranch) return false
+    return context.dirty || selectedBranch.checkedOut
+  }, [context, selectedBranch])
+
+  useEffect(() => {
+    if (requiresIsolation && !useWorktree) {
+      onUseWorktreeChange(true)
+    }
+  }, [onUseWorktreeChange, requiresIsolation, useWorktree])
+
   const selectBranch = (candidate: RepositoryBranchInfo) => {
     onBranchChange(candidate.name)
     setBranchMenuOpen(false)
@@ -244,13 +256,15 @@ export function RepositoryLaunchControls({
     onLaunchReadyChange?.(isLaunchReady)
   }, [isLaunchReady, onLaunchReadyChange])
 
+  const workbarButtonClassName = 'inline-flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35 disabled:cursor-not-allowed disabled:opacity-50'
+
   return (
     <div ref={rootRef} className="flex min-w-0 flex-col gap-2">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <DirectoryPicker value={workDir} onChange={onWorkDirChange} />
+      <div className="flex min-h-[58px] min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-b-[28px] bg-[var(--color-surface-container)] px-5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
+        <DirectoryPicker value={workDir} onChange={onWorkDirChange} variant="workbar" />
 
         {loading && workDir && (
-          <div className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)]">
+          <div className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-sm text-[var(--color-text-secondary)]">
             <Loader2 size={14} className="shrink-0 animate-spin" />
             <span>{t('common.loading')}</span>
           </div>
@@ -258,40 +272,41 @@ export function RepositoryLaunchControls({
 
         {isGitReady && (
           <>
+            <span className="h-5 w-px bg-[var(--color-border-separator)]" aria-hidden="true" />
             <button
               ref={branchButtonRef}
               type="button"
               disabled={disabled || loading || context.branches.length === 0}
               aria-haspopup="listbox"
               aria-expanded={branchMenuOpen}
-              aria-label={t('repoLaunch.selectBranch')}
+              aria-label={`${t('repoLaunch.selectBranch')}: ${selectedBranch?.name || t('repoLaunch.noBranch')}`}
               onClick={() => {
                 setBranchMenuOpen((prev) => !prev)
                 setBranchFilter('')
               }}
-              className="inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35 disabled:cursor-not-allowed disabled:opacity-50"
+              className={workbarButtonClassName}
             >
-              <GitBranch size={15} className="shrink-0" />
-              <span className="truncate font-medium text-[var(--color-text-primary)]">
+              <GitBranch size={18} className="shrink-0" />
+              <span className="min-w-0 max-w-[220px] truncate text-[var(--color-text-primary)]">
                 {selectedBranch?.name || t('repoLaunch.noBranch')}
               </span>
-              <ChevronDown size={14} className="shrink-0 text-[var(--color-text-tertiary)]" />
+              <ChevronDown size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />
             </button>
 
             <button
               type="button"
-              disabled={disabled}
+              disabled={disabled || requiresIsolation}
               aria-pressed={useWorktree}
               aria-label={t('repoLaunch.toggleWorktree')}
               onClick={() => onUseWorktreeChange(!useWorktree)}
-              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35 disabled:cursor-not-allowed disabled:opacity-50 ${
+              className={`${workbarButtonClassName} ${
                 useWorktree
-                  ? 'border-[var(--color-brand)]/40 bg-[var(--color-primary-fixed)] text-[var(--color-text-primary)]'
-                  : 'border-[var(--color-border)] bg-[var(--color-surface-container-low)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+                  ? 'bg-[var(--color-primary-fixed)] text-[var(--color-text-primary)]'
+                  : ''
               }`}
             >
-              <GitFork size={15} className="shrink-0" />
-              <span className="font-medium">
+              <GitFork size={18} className="shrink-0" />
+              <span className="min-w-0 truncate">
                 {useWorktree ? t('repoLaunch.worktreeIsolated') : t('repoLaunch.worktreeCurrent')}
               </span>
             </button>

@@ -303,4 +303,54 @@ describe('EmptySession', () => {
       })
     })
   })
+
+  it('defaults to isolated worktree when the fallback branch is checked out elsewhere', async () => {
+    mocks.getRepositoryContext.mockResolvedValueOnce(okRepositoryContext({
+      currentBranch: null,
+      defaultBranch: 'main',
+      branches: [
+        {
+          name: 'main',
+          current: false,
+          local: true,
+          remote: false,
+          checkedOut: true,
+          worktreePath: '/workspace/project',
+        },
+        {
+          name: 'feature/a',
+          current: false,
+          local: true,
+          remote: false,
+          checkedOut: false,
+        },
+      ],
+      worktrees: [{
+        path: '/workspace/project/.codex/worktrees/detached/project',
+        branch: null,
+        current: true,
+      }],
+    }))
+
+    render(<EmptySession />)
+
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'draft question', selectionStart: 14 },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Pick project' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('main')).toBeInTheDocument()
+      expect(screen.getByText('Isolated worktree')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalledWith({
+        workDir: '/workspace/project',
+        repository: { branch: 'main', worktree: true },
+      })
+    })
+  })
 })
