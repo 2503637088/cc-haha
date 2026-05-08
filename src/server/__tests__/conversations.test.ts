@@ -1493,6 +1493,130 @@ describe('WebSocket Chat Integration', () => {
     }
   }, 20_000)
 
+  it('should isolate provider runtime overrides across parallel sessions', async () => {
+    const providerService = new ProviderService()
+    const providerA = await providerService.addProvider({
+      presetId: 'custom',
+      name: 'Parallel Provider A',
+      apiKey: 'key-parallel-a',
+      baseUrl: 'http://127.0.0.1:1/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'parallel-a-main',
+        haiku: 'parallel-a-haiku',
+        sonnet: 'parallel-a-sonnet',
+        opus: 'parallel-a-opus',
+      },
+    })
+    const providerB = await providerService.addProvider({
+      presetId: 'custom',
+      name: 'Parallel Provider B',
+      apiKey: 'key-parallel-b',
+      baseUrl: 'http://127.0.0.1:1/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'parallel-b-main',
+        haiku: 'parallel-b-haiku',
+        sonnet: 'parallel-b-sonnet',
+        opus: 'parallel-b-opus',
+      },
+    })
+
+    const createSession = async () => {
+      const createRes = await fetch(`${baseUrl}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workDir: process.cwd() }),
+      })
+      expect(createRes.status).toBe(201)
+      const { sessionId } = await createRes.json() as { sessionId: string }
+      return sessionId
+    }
+    const [sessionA, sessionB] = await Promise.all([createSession(), createSession()])
+
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const startCalls: Array<{
+      sessionId: string
+      options: { permissionMode?: string; model?: string; effort?: string; providerId?: string | null } | undefined
+    }> = []
+
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
+    ) {
+      startCalls.push({ sessionId: sid, options })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    const runRuntimeTurn = (
+      sessionId: string,
+      providerId: string,
+      modelId: string,
+      content: string,
+    ) => new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+      const timeout = setTimeout(() => {
+        ws.close()
+        reject(new Error(`Timed out waiting for parallel runtime turn for ${sessionId}`))
+      }, 10_000)
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data as string)
+        if (msg.type === 'connected') {
+          ws.send(JSON.stringify({
+            type: 'set_runtime_config',
+            providerId,
+            modelId,
+          }))
+          ws.send(JSON.stringify({ type: 'user_message', content }))
+          return
+        }
+        if (msg.type === 'error') {
+          clearTimeout(timeout)
+          ws.close()
+          reject(new Error(msg.message))
+          return
+        }
+        if (msg.type === 'message_complete') {
+          clearTimeout(timeout)
+          ws.close()
+          resolve()
+        }
+      }
+      ws.onerror = () => {
+        clearTimeout(timeout)
+        reject(new Error(`WebSocket error for parallel runtime session ${sessionId}`))
+      }
+    })
+
+    try {
+      await Promise.all([
+        runRuntimeTurn(sessionA, providerA.id, 'parallel-a-sonnet', 'turn on provider a'),
+        runRuntimeTurn(sessionB, providerB.id, 'parallel-b-opus', 'turn on provider b'),
+      ])
+
+      expect(startCalls).toHaveLength(2)
+      expect(startCalls.find((call) => call.sessionId === sessionA)).toMatchObject({
+        options: {
+          providerId: providerA.id,
+          model: 'parallel-a-sonnet',
+        },
+      })
+      expect(startCalls.find((call) => call.sessionId === sessionB)).toMatchObject({
+        options: {
+          providerId: providerB.id,
+          model: 'parallel-b-opus',
+        },
+      })
+    } finally {
+      conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionA)
+      conversationService.stopSession(sessionB)
+    }
+  }, 20_000)
+
   it('should restart a prewarm that began before runtime config arrived', async () => {
     const providerService = new ProviderService()
     const provider = await providerService.addProvider({
