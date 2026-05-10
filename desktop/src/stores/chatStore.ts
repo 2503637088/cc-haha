@@ -16,12 +16,14 @@ import type { RuntimeSelection } from '../types/runtime'
 import type {
   AgentTaskNotification,
   AttachmentRef,
+  AutoRetryState,
   ChatState,
   ComputerUsePermissionRequest,
   ComputerUsePermissionResponse,
   UIAttachment,
   UIMessage,
   ServerMessage,
+  SessionGoal,
   TokenUsage,
 } from '../types/chat'
 
@@ -51,6 +53,8 @@ export type PerSessionState = {
   elapsedSeconds: number
   statusVerb: string
   slashCommands: Array<{ name: string; description: string }>
+  goal?: SessionGoal | null
+  retry?: AutoRetryState | null
   agentTaskNotifications: Record<string, AgentTaskNotification>
   elapsedTimer: ReturnType<typeof setInterval> | null
   composerPrefill?: {
@@ -75,6 +79,8 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   elapsedSeconds: 0,
   statusVerb: '',
   slashCommands: [],
+  goal: null,
+  retry: null,
   agentTaskNotifications: {},
   elapsedTimer: null,
   composerPrefill: null,
@@ -148,6 +154,33 @@ const AGENT_COMPLETION_NOTIFICATION_PREVIEW_CHARS = 160
 
 let msgCounter = 0
 const nextId = () => `msg-${++msgCounter}-${Date.now()}`
+
+function isSessionGoalData(value: unknown): value is SessionGoal {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.sessionId === 'string' &&
+    typeof record.goalId === 'string' &&
+    typeof record.objective === 'string' &&
+    typeof record.status === 'string' &&
+    typeof record.tokensUsed === 'number' &&
+    typeof record.timeUsedSeconds === 'number'
+  )
+}
+
+function isAutoRetryStateData(value: unknown): value is AutoRetryState {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.paused === 'boolean' &&
+    typeof record.failureCount === 'number' &&
+    typeof record.nextAttempt === 'number' &&
+    typeof record.intervalMs === 'number' &&
+    (typeof record.nextRetryAt === 'number' || record.nextRetryAt === null) &&
+    typeof record.errorMessage === 'string' &&
+    typeof record.errorCode === 'string'
+  )
+}
 
 // Streaming throttle for content_delta. Buffers must be per-session because
 // multiple desktop tabs can stream at the same time.
@@ -1077,6 +1110,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             statusVerb: '',
             tokenUsage: { input_tokens: 0, output_tokens: 0 },
             slashCommands: [],
+            goal: null,
+            retry: null,
           }))
           clearPendingDelta(sessionId)
           clearPendingTaskToolUseIds(sessionId)
@@ -1084,6 +1119,58 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           useSessionStore.getState().updateSessionTitle(sessionId, 'New Session')
           useTabStore.getState().updateTabTitle(sessionId, 'New Session')
           useTabStore.getState().updateTabStatus(sessionId, 'idle')
+        }
+        if (msg.subtype.startsWith('goal_')) {
+          const goal = isSessionGoalData(msg.data) ? msg.data : null
+          const message =
+            typeof msg.message === 'string' && msg.message.trim()
+              ? msg.message
+              : null
+          update((session) => ({
+            goal:
+              msg.subtype === 'goal_cleared' || msg.subtype === 'goal_status'
+                ? goal
+                : goal ?? session.goal ?? null,
+            ...(message
+              ? {
+                  messages: [
+                    ...session.messages,
+                    {
+                      id: nextId(),
+                      type: 'system',
+                      content: message,
+                      timestamp: Date.now(),
+                    },
+                  ],
+                }
+              : {}),
+          }))
+        }
+        if (msg.subtype.startsWith('retry_')) {
+          const retry = isAutoRetryStateData(msg.data) ? msg.data : null
+          const message =
+            typeof msg.message === 'string' && msg.message.trim()
+              ? msg.message
+              : null
+          update((session) => ({
+            retry:
+              msg.subtype === 'retry_cleared' || msg.subtype === 'retry_succeeded'
+                ? null
+                : retry ?? session.retry ?? null,
+            ...(message
+              ? {
+                  messages: [
+                    ...session.messages,
+                    {
+                      id: nextId(),
+                      type: 'system',
+                      content: message,
+                      timestamp: Date.now(),
+                    },
+                  ],
+                }
+              : {}),
+          }))
         }
         if (msg.subtype === 'compact_boundary') {
           update((session) => ({

@@ -149,6 +149,8 @@ function makeSession(overrides: Partial<PerSessionState> = {}): PerSessionState 
     elapsedSeconds: 0,
     statusVerb: '',
     slashCommands: [],
+    goal: null,
+    retry: null,
     agentTaskNotifications: {},
     elapsedTimer: null,
     ...overrides,
@@ -1214,6 +1216,98 @@ describe('chatStore history mapping', () => {
     vi.advanceTimersByTime(60)
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.streamingText).toBe('')
     vi.useRealTimers()
+  })
+
+  it('tracks persistent goal system notifications', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    const goal = {
+      sessionId: TEST_SESSION_ID,
+      goalId: 'goal-1',
+      objective: 'finish the migration',
+      status: 'active' as const,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'goal_updated',
+      message: 'Session goal set: finish the migration',
+      data: goal,
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.goal).toEqual(goal)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      { type: 'system', content: 'Session goal set: finish the migration' },
+    ])
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'goal_cleared',
+      message: 'Session goal cleared.',
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.goal).toBeNull()
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toHaveLength(2)
+  })
+
+  it('tracks automatic retry system notifications and exposes retry state', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    const retry = {
+      paused: false,
+      failureCount: 1,
+      nextAttempt: 1,
+      intervalMs: 120_000,
+      nextRetryAt: 1760000000000,
+      errorMessage: 'API Error: overloaded',
+      errorCode: 'CLI_ERROR',
+    }
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'retry_scheduled',
+      message: 'Model request failed. Retrying in 120 seconds (retry #1).',
+      data: retry,
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.retry).toEqual(retry)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      { type: 'system', content: 'Model request failed. Retrying in 120 seconds (retry #1).' },
+    ])
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'retry_paused',
+      message: 'Automatic retry paused.',
+      data: { ...retry, paused: true, nextRetryAt: null },
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.retry).toMatchObject({
+      paused: true,
+      nextRetryAt: null,
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'retry_cleared',
+      message: 'Automatic retry state cleared.',
+      data: null,
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.retry).toBeNull()
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toHaveLength(3)
   })
 
   it('clears local message state for only the requested session', () => {

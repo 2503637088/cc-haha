@@ -89,6 +89,30 @@ export type TokenUsage = {
   cache_creation_tokens?: number
 }
 
+export type GoalStatus = 'active' | 'paused' | 'budget_limited' | 'complete'
+
+export type SessionGoal = {
+  sessionId: string
+  goalId: string
+  objective: string
+  status: GoalStatus
+  tokenBudget?: number
+  tokensUsed: number
+  timeUsedSeconds: number
+  createdAt: string
+  updatedAt: string
+}
+
+export type AutoRetryState = {
+  paused: boolean
+  failureCount: number
+  nextAttempt: number
+  intervalMs: number
+  nextRetryAt: number | null
+  errorMessage: string
+  errorCode: string
+}
+
 export type ChatState = 'idle' | 'thinking' | 'tool_executing' | 'streaming' | 'permission_pending'
 
 export type TeamMemberStatus = {
