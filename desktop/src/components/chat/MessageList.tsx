@@ -18,7 +18,7 @@ import { AskUserQuestion } from './AskUserQuestion'
 import { StreamingIndicator } from './StreamingIndicator'
 import { InlineTaskSummary } from './InlineTaskSummary'
 import { CurrentTurnChangeCard } from './CurrentTurnChangeCard'
-import type { AgentTaskNotification, UIMessage } from '../../types/chat'
+import type { AgentTaskNotification, AutoRetryState, UIMessage } from '../../types/chat'
 import { ConfirmDialog } from '../shared/ConfirmDialog'
 
 type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
@@ -299,6 +299,80 @@ function scrollToElementBottom(
   container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
 }
 
+function getRetryRemainingSeconds(retry: AutoRetryState, now: number) {
+  if (!retry.nextRetryAt) return 0
+  return Math.max(0, Math.ceil((retry.nextRetryAt - now) / 1000))
+}
+
+function formatRetryCountdown(seconds: number) {
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60)
+    const remainder = seconds % 60
+    return `${minutes}:${String(remainder).padStart(2, '0')}`
+  }
+  return `${seconds}s`
+}
+
+function getRetryNoticeTitle(retry: AutoRetryState, now: number) {
+  if (retry.paused || retry.status === 'paused') {
+    return retry.statusMessage || 'Automatic retry paused'
+  }
+
+  if (retry.status === 'attempting' || retry.status === 'resumed' || !retry.nextRetryAt) {
+    return `Retrying model request (retry #${retry.failureCount})`
+  }
+
+  const remainingSeconds = getRetryRemainingSeconds(retry, now)
+  return `Retrying in ${formatRetryCountdown(remainingSeconds)} (retry #${retry.failureCount})`
+}
+
+function AutoRetryNotice({ retry }: { retry: AutoRetryState }) {
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (retry.paused || !retry.nextRetryAt) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [retry.nextRetryAt, retry.paused])
+
+  const title = getRetryNoticeTitle(retry, now)
+  const helperText = retry.paused
+    ? 'Use /retry resume to continue, /retry now to retry immediately, or /retry clear to clear this state.'
+    : 'Use /retry error to view details, /retry pause to pause, or /retry now to retry immediately.'
+
+  return (
+    <div
+      role="status"
+      aria-label="Automatic retry status"
+      className="mb-4 rounded-[var(--radius-lg)] border border-[var(--color-warning)]/30 bg-[var(--color-warning-container)]/20 px-4 py-3 text-sm text-[var(--color-text-primary)] shadow-sm"
+    >
+      <div className="flex items-start gap-3">
+        <span className="material-symbols-rounded mt-0.5 text-[18px] text-[var(--color-warning)]">
+          autorenew
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="font-medium">{title}</span>
+            <span className="rounded-full bg-[var(--color-surface-container)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)]">
+              attempt {retry.failureCount}
+            </span>
+          </div>
+          <div className="mt-1 text-xs text-[var(--color-text-secondary)]">
+            Last error code: {retry.errorCode}
+          </div>
+          <div className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--color-surface-container-low)] px-3 py-2 font-mono text-xs text-[var(--color-text-secondary)]">
+            {retry.errorMessage}
+          </div>
+          <div className="mt-2 text-xs text-[var(--color-text-tertiary)]">
+            {helperText}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function MessageList({ sessionId, compact = false }: MessageListProps = {}) {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const resolvedSessionId = sessionId ?? activeTabId
@@ -317,6 +391,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const chatState = sessionState?.chatState ?? 'idle'
   const streamingText = sessionState?.streamingText ?? ''
   const activeThinkingId = sessionState?.activeThinkingId ?? null
+  const retry = sessionState?.retry ?? null
   const agentTaskNotifications = sessionState?.agentTaskNotifications ?? {}
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const scrollContentRef = useRef<HTMLDivElement>(null)
@@ -394,6 +469,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     chatState,
     messages,
     resolvedSessionId,
+    retry,
     scheduleAutoScroll,
     streamingText,
     turnChangeCards,
@@ -708,6 +784,8 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
         {(chatState === 'tool_executing' || (chatState === 'thinking' && !activeThinkingId)) && (
           <StreamingIndicator />
         )}
+
+        {retry && <AutoRetryNotice retry={retry} />}
 
         {!isLoadingTurnChangeCards && turnChangeCards.length === 0 && turnChangeLoadError && (
           <div className="mx-auto mb-5 w-full max-w-[860px] rounded-[var(--radius-lg)] border border-[var(--color-error)]/25 bg-[var(--color-error-container)]/18 px-4 py-3 text-xs text-[var(--color-error)]">

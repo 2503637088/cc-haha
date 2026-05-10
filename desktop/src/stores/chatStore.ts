@@ -182,6 +182,55 @@ function isAutoRetryStateData(value: unknown): value is AutoRetryState {
   )
 }
 
+function getRetryStatusFromSubtype(
+  subtype: string,
+  retry: AutoRetryState,
+): AutoRetryState['status'] {
+  if (subtype === 'retry_attempting' || subtype === 'retry_resumed') return 'attempting'
+  if (subtype === 'retry_paused' || retry.paused) return 'paused'
+  if (subtype === 'retry_scheduled') return 'scheduled'
+  return 'status'
+}
+
+function normalizeRetryState(
+  retry: AutoRetryState,
+  subtype: string,
+  message: string | null,
+): AutoRetryState {
+  return {
+    ...retry,
+    status: getRetryStatusFromSubtype(subtype, retry),
+    statusMessage: message ?? retry.statusMessage,
+  }
+}
+
+function removeTrailingRetryErrorMessages(
+  messages: UIMessage[],
+  retry: AutoRetryState | null,
+): UIMessage[] {
+  if (!retry) return messages
+
+  let end = messages.length
+  while (end > 0) {
+    const message = messages[end - 1]
+    if (
+      message?.type === 'error' &&
+      message.message === retry.errorMessage &&
+      message.code === retry.errorCode
+    ) {
+      end -= 1
+      continue
+    }
+    break
+  }
+
+  return end === messages.length ? messages : messages.slice(0, end)
+}
+
+function shouldAppendRetrySystemMessage(subtype: string): boolean {
+  return subtype === 'retry_status' || subtype === 'retry_cleared'
+}
+
 // Streaming throttle for content_delta. Buffers must be per-session because
 // multiple desktop tabs can stream at the same time.
 const pendingDeltaBySession = new Map<string, string>()
@@ -570,6 +619,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             statusVerb: isMemberSession ? '' : randomSpinnerVerb(),
             elapsedTimer: timer,
             connectionState: isMemberSession ? 'connected' : session.connectionState,
+            retry: null,
           },
         },
       }
@@ -1053,7 +1103,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           if (pendingText.trim()) {
             newMessages = appendAssistantTextMessage(newMessages, pendingText, Date.now())
           }
-          newMessages = [...newMessages, { id: nextId(), type: 'error', message: msg.message, code: msg.code, timestamp: Date.now() }]
+          if (!s.retry) {
+            newMessages = [...newMessages, { id: nextId(), type: 'error', message: msg.message, code: msg.code, timestamp: Date.now() }]
+          }
           return {
             messages: newMessages,
             chatState: 'idle',
@@ -1152,25 +1204,37 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             typeof msg.message === 'string' && msg.message.trim()
               ? msg.message
               : null
-          update((session) => ({
-            retry:
-              msg.subtype === 'retry_cleared' || msg.subtype === 'retry_succeeded'
-                ? null
-                : retry ?? session.retry ?? null,
-            ...(message
-              ? {
-                  messages: [
-                    ...session.messages,
+          const nextRetry =
+            msg.subtype === 'retry_cleared' || msg.subtype === 'retry_succeeded'
+              ? null
+              : retry
+                ? normalizeRetryState(retry, msg.subtype, message)
+                : null
+          update((session) => {
+            const retryForErrorCleanup = nextRetry ?? session.retry ?? null
+            const messages = removeTrailingRetryErrorMessages(
+              session.messages,
+              retryForErrorCleanup,
+            )
+            return {
+              retry: nextRetry ?? (
+                msg.subtype === 'retry_cleared' || msg.subtype === 'retry_succeeded'
+                  ? null
+                  : session.retry ?? null
+              ),
+              messages: message && shouldAppendRetrySystemMessage(msg.subtype)
+                ? [
+                    ...messages,
                     {
                       id: nextId(),
                       type: 'system',
                       content: message,
                       timestamp: Date.now(),
                     },
-                  ],
-                }
-              : {}),
-          }))
+                  ]
+                : messages,
+            }
+          })
         }
         if (msg.subtype === 'compact_boundary') {
           update((session) => ({

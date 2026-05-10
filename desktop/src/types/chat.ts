@@ -111,6 +111,10 @@ export type AutoRetryState = {
   nextRetryAt: number | null
   errorMessage: string
   errorCode: string
+  source?: 'user' | 'goal' | 'synthetic'
+  synthetic?: boolean
+  status?: 'scheduled' | 'attempting' | 'paused' | 'status' | 'resumed'
+  statusMessage?: string
 }
 
 export type ChatState = 'idle' | 'thinking' | 'tool_executing' | 'streaming' | 'permission_pending'

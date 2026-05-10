@@ -682,6 +682,73 @@ describe('MessageList nested tool calls', () => {
     }
   })
 
+  it('renders automatic retry state as one live countdown notice', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            retry: {
+              paused: false,
+              failureCount: 2,
+              nextAttempt: 2,
+              intervalMs: 120_000,
+              nextRetryAt: Date.now() + 120_000,
+              errorMessage: 'API Error: Input is too long.',
+              errorCode: 'CLI_ERROR',
+              status: 'scheduled',
+            },
+          }),
+        },
+      })
+
+      render(<MessageList />)
+
+      const notice = screen.getByRole('status', { name: 'Automatic retry status' })
+      expect(within(notice).getByText('Retrying in 2:00 (retry #2)')).toBeTruthy()
+      expect(within(notice).getByText('attempt 2')).toBeTruthy()
+      expect(within(notice).getByText('Last error code: CLI_ERROR')).toBeTruthy()
+      expect(within(notice).getByText('API Error: Input is too long.')).toBeTruthy()
+
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+
+      expect(within(notice).getByText('Retrying in 1:59 (retry #2)')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('renders paused automatic retry state without transcript spam', () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [],
+          retry: {
+            paused: true,
+            failureCount: 1,
+            nextAttempt: 1,
+            intervalMs: 120_000,
+            nextRetryAt: null,
+            errorMessage: 'API Error: overloaded',
+            errorCode: 'CLI_ERROR',
+            status: 'paused',
+            statusMessage: 'Automatic retry paused after stop.',
+          },
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    const notice = screen.getByRole('status', { name: 'Automatic retry status' })
+    expect(within(notice).getByText('Automatic retry paused after stop.')).toBeTruthy()
+    expect(within(notice).getByText('Use /retry resume to continue, /retry now to retry immediately, or /retry clear to clear this state.')).toBeTruthy()
+    expect(screen.queryByText('Retrying in')).toBeNull()
+  })
+
   it('keeps user actions anchored to the right bubble and assistant actions to the left bubble', () => {
     useChatStore.setState({
       sessions: {

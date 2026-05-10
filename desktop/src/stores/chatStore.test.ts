@@ -1282,10 +1282,20 @@ describe('chatStore history mapping', () => {
       data: retry,
     })
 
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.retry).toEqual(retry)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
-      { type: 'system', content: 'Model request failed. Retrying in 120 seconds (retry #1).' },
-    ])
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.retry).toMatchObject({
+      ...retry,
+      status: 'scheduled',
+      statusMessage: 'Model request failed. Retrying in 120 seconds (retry #1).',
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toEqual([])
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'error',
+      message: 'API Error: overloaded',
+      code: 'CLI_ERROR',
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toEqual([])
 
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
       type: 'system_notification',
@@ -1297,7 +1307,9 @@ describe('chatStore history mapping', () => {
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.retry).toMatchObject({
       paused: true,
       nextRetryAt: null,
+      status: 'paused',
     })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toEqual([])
 
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
       type: 'system_notification',
@@ -1307,7 +1319,82 @@ describe('chatStore history mapping', () => {
     })
 
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.retry).toBeNull()
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toHaveLength(3)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      { type: 'system', content: 'Automatic retry state cleared.' },
+    ])
+  })
+
+  it('coalesces automatic retry errors into retry state across attempts', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    const retryError = 'API Error: Input is too long.'
+    const retry1 = {
+      paused: false,
+      failureCount: 1,
+      nextAttempt: 1,
+      intervalMs: 120_000,
+      nextRetryAt: 1760000000000,
+      errorMessage: retryError,
+      errorCode: 'CLI_ERROR',
+    }
+    const retry2 = {
+      ...retry1,
+      failureCount: 2,
+      nextAttempt: 2,
+      nextRetryAt: 1760000120000,
+    }
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'error',
+      message: retryError,
+      code: 'CLI_ERROR',
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      { type: 'error', message: retryError, code: 'CLI_ERROR' },
+    ])
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'retry_scheduled',
+      message: 'Model request failed. Retrying in 120 seconds (retry #1).',
+      data: retry1,
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toEqual([])
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.retry).toMatchObject({
+      failureCount: 1,
+      status: 'scheduled',
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'retry_attempting',
+      message: 'Retrying model request (retry #1).',
+      data: { ...retry1, nextRetryAt: null },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'error',
+      message: retryError,
+      code: 'CLI_ERROR',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'retry_scheduled',
+      message: 'Model request failed. Retrying in 120 seconds (retry #2).',
+      data: retry2,
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toEqual([])
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.retry).toMatchObject({
+      failureCount: 2,
+      status: 'scheduled',
+      statusMessage: 'Model request failed. Retrying in 120 seconds (retry #2).',
+    })
   })
 
   it('clears local message state for only the requested session', () => {
