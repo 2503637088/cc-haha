@@ -1,4 +1,4 @@
-import { useRef, useEffect, useMemo, memo, useState, useCallback } from 'react'
+import { useRef, useEffect, useLayoutEffect, useMemo, memo, useState, useCallback } from 'react'
 import { ApiError } from '../../api/client'
 import { sessionsApi, type SessionTurnCheckpoint } from '../../api/sessions'
 import { useChatStore } from '../../stores/chatStore'
@@ -47,6 +47,12 @@ type TurnChangeCardModel = {
   checkpoint: SessionTurnCheckpoint
   workDir: string | null
   isLatest: boolean
+}
+
+type RewindConfirmRequest = {
+  target: RewindTurnTarget
+  isLatest: boolean
+  source: 'message' | 'change-card'
 }
 
 function appendChildToolCall(
@@ -282,7 +288,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const [turnActionErrors, setTurnActionErrors] = useState<Record<string, string>>({})
   const [isLoadingTurnChangeCards, setIsLoadingTurnChangeCards] = useState(false)
   const [rewindingTurnId, setRewindingTurnId] = useState<string | null>(null)
-  const [turnUndoConfirmTargetId, setTurnUndoConfirmTargetId] = useState<string | null>(null)
+  const [rewindConfirmRequest, setRewindConfirmRequest] = useState<RewindConfirmRequest | null>(null)
 
   const updateAutoScrollState = useCallback(() => {
     const container = scrollContainerRef.current
@@ -290,7 +296,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     shouldAutoScrollRef.current = isNearScrollBottom(container)
   }, [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (lastSessionIdRef.current !== resolvedSessionId) {
       shouldAutoScrollRef.current = true
       lastSessionIdRef.current = resolvedSessionId
@@ -299,7 +305,15 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     if (!shouldAutoScrollRef.current) return
 
     bottomRef.current?.scrollIntoView?.({ behavior: 'smooth' })
-  }, [messages.length, resolvedSessionId, streamingText])
+  }, [
+    activeThinkingId,
+    agentTaskNotifications,
+    chatState,
+    messages,
+    resolvedSessionId,
+    streamingText,
+    turnChangeCards,
+  ])
 
   const { toolResultMap, childToolCallsByParent, renderItems } = useMemo(
     () => buildRenderModel(messages),
@@ -314,9 +328,9 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     () => buildTurnCardInsertionMap(renderItems, turnChangeCards),
     [renderItems, turnChangeCards],
   )
-  const confirmTurnCard = useMemo(
-    () => turnChangeCards.find((card) => card.target.messageId === turnUndoConfirmTargetId) ?? null,
-    [turnChangeCards, turnUndoConfirmTargetId],
+  const completedTurnTargetByMessageId = useMemo(
+    () => new Map(completedTurnTargets.map((target) => [target.messageId, target] as const)),
+    [completedTurnTargets],
   )
 
   useEffect(() => {
@@ -384,9 +398,9 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   }, [chatState, completedTurnTargets, isMemberSession, latestCompletedTurnId, resolvedSessionId])
 
   const handleUndoCurrentTurn = useCallback(async () => {
-    if (!resolvedSessionId || !confirmTurnCard || rewindingTurnId) return
+    if (!resolvedSessionId || !rewindConfirmRequest || rewindingTurnId) return
 
-    const target = confirmTurnCard.target
+    const target = rewindConfirmRequest.target
     setRewindingTurnId(target.messageId)
     setTurnActionErrors((current) => {
       if (!(target.messageId in current)) return current
@@ -420,30 +434,67 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
             })
           : t('chat.rewindSuccessConversationOnly', {
               count: result.conversation.messagesRemoved,
-            }),
+          }),
       })
 
-      setTurnUndoConfirmTargetId(null)
+      setRewindConfirmRequest(null)
     } catch (error) {
+      const message = getApiErrorMessage(error)
       setTurnActionErrors((current) => ({
         ...current,
-        [target.messageId]: getApiErrorMessage(error),
+        [target.messageId]: message,
       }))
-      setTurnUndoConfirmTargetId(null)
+      addToast({
+        type: 'error',
+        message,
+      })
+      setRewindConfirmRequest(null)
     } finally {
       setRewindingTurnId(null)
     }
   }, [
     addToast,
     chatState,
-    confirmTurnCard,
     queueComposerPrefill,
     reloadHistory,
     resolvedSessionId,
+    rewindConfirmRequest,
     rewindingTurnId,
     stopGeneration,
     t,
   ])
+
+  const getConfirmText = useCallback((request: RewindConfirmRequest | null) => {
+    if (!request) {
+      return {
+        title: '',
+        body: '',
+        confirmLabel: '',
+      }
+    }
+
+    if (request.source === 'change-card') {
+      return {
+        title: request.isLatest
+          ? t('chat.turnChangesLatestConfirmTitle')
+          : t('chat.turnChangesHistoricalConfirmTitle'),
+        body: request.isLatest
+          ? t('chat.turnChangesLatestConfirmBody')
+          : t('chat.turnChangesHistoricalConfirmBody'),
+        confirmLabel: request.isLatest
+          ? t('chat.turnChangesLatestConfirmUndo')
+          : t('chat.turnChangesHistoricalConfirmUndo'),
+      }
+    }
+
+    return {
+      title: t('chat.recallLatestConfirmTitle'),
+      body: t('chat.recallLatestConfirmBody'),
+      confirmLabel: t('chat.recallConfirmUndo'),
+    }
+  }, [t])
+
+  const confirmText = getConfirmText(rewindConfirmRequest)
 
   return (
     <div
@@ -468,21 +519,46 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
                     item.toolCalls.some((tc) => !toolResultMap.has(tc.toolUseId))
                   }
                 />
-              ) : (
-                <MessageBlock
-                  message={item.message}
-                  activeThinkingId={activeThinkingId}
-                  agentTaskNotifications={agentTaskNotifications}
-                  toolResult={
-                    item.message.type === 'tool_use'
-                      ? (() => {
-                          const result = toolResultMap.get(item.message.toolUseId)
-                          return result ? { content: result.content, isError: result.isError } : null
-                        })()
-                      : null
-                  }
-                />
-              )}
+              ) : (() => {
+                const userTurnTarget = item.message.type === 'user_text'
+                  ? completedTurnTargetByMessageId.get(item.message.id) ?? null
+                  : null
+                const canRecallUserTurn =
+                  Boolean(userTurnTarget) &&
+                  userTurnTarget?.messageId === latestCompletedTurnId &&
+                  chatState === 'idle' &&
+                  !isMemberSession
+
+                return (
+                  <MessageBlock
+                    message={item.message}
+                    activeThinkingId={activeThinkingId}
+                    agentTaskNotifications={agentTaskNotifications}
+                    toolResult={
+                      item.message.type === 'tool_use'
+                        ? (() => {
+                            const result = toolResultMap.get(item.message.toolUseId)
+                            return result ? { content: result.content, isError: result.isError } : null
+                          })()
+                        : null
+                    }
+                    recallAction={canRecallUserTurn && userTurnTarget
+                      ? {
+                          label: t('chat.recallToEditAria'),
+                          displayLabel: t('chat.recallToEdit'),
+                          disabled: rewindingTurnId === userTurnTarget.messageId,
+                          onRecall: () => {
+                            setRewindConfirmRequest({
+                              target: userTurnTarget,
+                              isLatest: true,
+                              source: 'message',
+                            })
+                          },
+                        }
+                      : null}
+                  />
+                )
+              })()}
 
               {resolvedSessionId && cardsForItem.map((card) => (
                 <CurrentTurnChangeCard
@@ -495,7 +571,11 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
                   isUndoing={rewindingTurnId === card.target.messageId}
                   isLatest={card.isLatest}
                   onUndo={() => {
-                    setTurnUndoConfirmTargetId(card.target.messageId)
+                    setRewindConfirmRequest({
+                      target: card.target,
+                      isLatest: card.isLatest,
+                      source: 'change-card',
+                    })
                   }}
                 />
               ))}
@@ -525,22 +605,16 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
       </div>
 
       <ConfirmDialog
-        open={Boolean(confirmTurnCard)}
+        open={Boolean(rewindConfirmRequest)}
         onClose={() => {
           if (!rewindingTurnId) {
-            setTurnUndoConfirmTargetId(null)
+            setRewindConfirmRequest(null)
           }
         }}
         onConfirm={handleUndoCurrentTurn}
-        title={confirmTurnCard?.isLatest
-          ? t('chat.turnChangesLatestConfirmTitle')
-          : t('chat.turnChangesHistoricalConfirmTitle')}
-        body={confirmTurnCard?.isLatest
-          ? t('chat.turnChangesLatestConfirmBody')
-          : t('chat.turnChangesHistoricalConfirmBody')}
-        confirmLabel={confirmTurnCard?.isLatest
-          ? t('chat.turnChangesLatestConfirmUndo')
-          : t('chat.turnChangesHistoricalConfirmUndo')}
+        title={confirmText.title}
+        body={confirmText.body}
+        confirmLabel={confirmText.confirmLabel}
         cancelLabel={t('common.cancel')}
         confirmVariant="danger"
         loading={Boolean(rewindingTurnId)}
@@ -554,11 +628,18 @@ export const MessageBlock = memo(function MessageBlock({
   activeThinkingId,
   agentTaskNotifications,
   toolResult,
+  recallAction,
 }: {
   message: UIMessage
   activeThinkingId: string | null
   agentTaskNotifications: Record<string, AgentTaskNotification>
   toolResult?: { content: unknown; isError: boolean } | null
+  recallAction?: {
+    label: string
+    displayLabel: string
+    disabled: boolean
+    onRecall: () => void
+  } | null
 }) {
   const t = useTranslation()
 
@@ -568,6 +649,10 @@ export const MessageBlock = memo(function MessageBlock({
         <UserMessage
           content={message.content}
           attachments={message.attachments}
+          onRecall={recallAction?.onRecall}
+          recallLabel={recallAction?.label}
+          recallDisplayLabel={recallAction?.displayLabel}
+          recallDisabled={recallAction?.disabled}
         />
       )
     case 'assistant_text':
