@@ -609,6 +609,79 @@ describe('MessageList nested tool calls', () => {
     expect(scrollIntoView).toHaveBeenCalled()
   })
 
+  it('keeps auto-scrolling when rendered content grows without a message state change', async () => {
+    const scrollIntoView = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    })
+
+    let resizeCallback: ResizeObserverCallback | null = null
+    const originalResizeObserver = globalThis.ResizeObserver
+    class ResizeObserverMock {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback
+      }
+      observe = vi.fn()
+      disconnect = vi.fn()
+    }
+    Object.defineProperty(globalThis, 'ResizeObserver', {
+      configurable: true,
+      value: ResizeObserverMock,
+    })
+
+    try {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            chatState: 'tool_executing',
+            messages: [
+              {
+                id: 'tool-bash',
+                type: 'tool_use',
+                toolName: 'Bash',
+                toolUseId: 'bash-1',
+                input: { command: 'printf "lots of output"' },
+                timestamp: 1,
+              },
+            ],
+          }),
+        },
+      })
+
+      const { container } = render(<MessageList />)
+      await waitFor(() => {
+        expect(resizeCallback).toBeTruthy()
+      })
+
+      const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+      let scrollTop = 552
+      Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
+      Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+      Object.defineProperty(scroller, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value) => {
+          scrollTop = value
+        },
+      })
+
+      scrollIntoView.mockClear()
+      fireEvent.scroll(scroller)
+
+      act(() => {
+        resizeCallback?.([], {} as ResizeObserver)
+      })
+
+      expect(scrollIntoView).toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(globalThis, 'ResizeObserver', {
+        configurable: true,
+        value: originalResizeObserver,
+      })
+    }
+  })
+
   it('keeps user actions anchored to the right bubble and assistant actions to the left bubble', () => {
     useChatStore.setState({
       sessions: {

@@ -282,12 +282,21 @@ type MessageListProps = {
 }
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 48
+const AUTO_SCROLL_FRAME_PASSES = 2
 
 function isNearScrollBottom(element: HTMLElement) {
   return (
     element.scrollHeight - element.scrollTop - element.clientHeight <=
     AUTO_SCROLL_BOTTOM_THRESHOLD_PX
   )
+}
+
+function scrollToElementBottom(
+  container: HTMLElement,
+  bottomElement: HTMLElement | null,
+) {
+  bottomElement?.scrollIntoView?.({ behavior: 'auto', block: 'end' })
+  container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
 }
 
 export function MessageList({ sessionId, compact = false }: MessageListProps = {}) {
@@ -310,8 +319,10 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const activeThinkingId = sessionState?.activeThinkingId ?? null
   const agentTaskNotifications = sessionState?.agentTaskNotifications ?? {}
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const scrollContentRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const shouldAutoScrollRef = useRef(true)
+  const pendingAutoScrollFramesRef = useRef<number[]>([])
   const lastSessionIdRef = useRef<string | null | undefined>(resolvedSessionId)
   const t = useTranslation()
   const [turnChangeCards, setTurnChangeCards] = useState<TurnChangeCardModel[]>([])
@@ -327,24 +338,82 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     shouldAutoScrollRef.current = isNearScrollBottom(container)
   }, [])
 
+  const clearPendingAutoScrollFrames = useCallback(() => {
+    if (typeof window === 'undefined' || typeof window.cancelAnimationFrame !== 'function') {
+      pendingAutoScrollFramesRef.current = []
+      return
+    }
+    for (const frameId of pendingAutoScrollFramesRef.current) {
+      window.cancelAnimationFrame(frameId)
+    }
+    pendingAutoScrollFramesRef.current = []
+  }, [])
+
+  const performAutoScroll = useCallback(() => {
+    if (!shouldAutoScrollRef.current) return
+    const container = scrollContainerRef.current
+    if (!container) return
+    scrollToElementBottom(container, bottomRef.current)
+  }, [])
+
+  const scheduleAutoScroll = useCallback(() => {
+    if (!shouldAutoScrollRef.current) return
+
+    clearPendingAutoScrollFrames()
+    performAutoScroll()
+
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+      return
+    }
+
+    const scheduleFrame = (remainingPasses: number) => {
+      if (remainingPasses <= 0) return
+      const frameId = window.requestAnimationFrame(() => {
+        pendingAutoScrollFramesRef.current = pendingAutoScrollFramesRef.current.filter(
+          (id) => id !== frameId,
+        )
+        performAutoScroll()
+        scheduleFrame(remainingPasses - 1)
+      })
+      pendingAutoScrollFramesRef.current.push(frameId)
+    }
+
+    scheduleFrame(AUTO_SCROLL_FRAME_PASSES)
+  }, [clearPendingAutoScrollFrames, performAutoScroll])
+
   useLayoutEffect(() => {
     if (lastSessionIdRef.current !== resolvedSessionId) {
       shouldAutoScrollRef.current = true
       lastSessionIdRef.current = resolvedSessionId
     }
 
-    if (!shouldAutoScrollRef.current) return
-
-    bottomRef.current?.scrollIntoView?.({ behavior: 'smooth' })
+    scheduleAutoScroll()
   }, [
     activeThinkingId,
     agentTaskNotifications,
     chatState,
     messages,
     resolvedSessionId,
+    scheduleAutoScroll,
     streamingText,
     turnChangeCards,
   ])
+
+  useEffect(() => {
+    const content = scrollContentRef.current
+    if (!content || typeof ResizeObserver === 'undefined') return
+
+    const observer = new ResizeObserver(() => {
+      scheduleAutoScroll()
+    })
+    observer.observe(content)
+
+    return () => {
+      observer.disconnect()
+    }
+  }, [resolvedSessionId, scheduleAutoScroll])
+
+  useEffect(() => clearPendingAutoScrollFrames, [clearPendingAutoScrollFrames])
 
   const { toolResultMap, childToolCallsByParent, renderItems } = useMemo(
     () => buildRenderModel(messages),
@@ -544,7 +613,10 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
       onScroll={updateAutoScrollState}
       className={`flex-1 overflow-y-auto ${compact ? 'px-3 py-3 pb-5' : 'px-4 py-4'}`}
     >
-      <div className={compact ? 'mx-auto max-w-full' : 'mx-auto max-w-[860px]'}>
+      <div
+        ref={scrollContentRef}
+        className={compact ? 'mx-auto max-w-full' : 'mx-auto max-w-[860px]'}
+      >
         {renderItems.map((item, index) => {
           const cardsForItem = turnCardsByRenderIndex.get(index) ?? []
 
