@@ -119,6 +119,7 @@ type ChatStore = {
     sessionId: string,
     prefill: { text: string; attachments?: UIAttachment[] },
   ) => void
+  discardLocalTurn: (sessionId: string, targetUserMessageId: string) => void
   clearMessages: (sessionId: string) => void
   handleServerMessage: (sessionId: string, msg: ServerMessage) => void
 }
@@ -210,6 +211,126 @@ function appendAssistantTextMessage(
   ]
 }
 
+function messageHistorySignature(messages: UIMessage[]): string {
+  return messages
+    .map((message) => {
+      switch (message.type) {
+        case 'user_text':
+          return `${message.type}:${message.id}:${message.content}:${message.modelContent ?? ''}`
+        case 'assistant_text':
+          return `${message.type}:${message.id}:${message.content}:${message.model ?? ''}`
+        case 'thinking':
+          return `${message.type}:${message.id}:${message.content}`
+        case 'tool_use':
+          return `${message.type}:${message.id}:${message.toolUseId}:${message.toolName}`
+        case 'tool_result':
+          return `${message.type}:${message.id}:${message.toolUseId}:${message.isError}`
+        case 'error':
+          return `${message.type}:${message.id}:${message.code}:${message.message}`
+        case 'task_summary':
+          return `${message.type}:${message.id}:${message.tasks.length}`
+        case 'permission_request':
+          return `${message.type}:${message.id}:${message.requestId}:${message.toolName}`
+        case 'system':
+          return `${message.type}:${message.id}:${message.content}`
+        default:
+          return `${(message as { type: string }).type}:${(message as { id?: string }).id ?? ''}`
+      }
+    })
+    .join('\n')
+}
+
+type HistorySnapshotApplyMode = 'replace' | 'recover'
+
+function normalizeComparableMessageText(text: string): string {
+  return text.replace(/\r\n/g, '\n').trim()
+}
+
+function getUserTurnComparableContents(messages: UIMessage[]): string[] {
+  return messages.flatMap((message) => {
+    if (message.type !== 'user_text' || message.pending) return []
+    return [normalizeComparableMessageText(message.modelContent ?? message.content)]
+  })
+}
+
+function historyCoversLocalUserTurns(
+  localMessages: UIMessage[],
+  historyMessages: UIMessage[],
+): boolean {
+  const localTurns = getUserTurnComparableContents(localMessages)
+  const historyTurns = getUserTurnComparableContents(historyMessages)
+  if (localTurns.length === 0 || historyTurns.length < localTurns.length) return false
+  return localTurns.every((content, index) => historyTurns[index] === content)
+}
+
+function hasAssistantCompletionForUserTurn(messages: UIMessage[], userTurnIndex: number): boolean {
+  let currentUserTurnIndex = -1
+
+  for (const message of messages) {
+    if (message.type === 'user_text' && !message.pending) {
+      currentUserTurnIndex += 1
+      continue
+    }
+    if (
+      currentUserTurnIndex === userTurnIndex &&
+      (message.type === 'assistant_text' || message.type === 'error')
+    ) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function historyContainsStreamingText(
+  historyMessages: UIMessage[],
+  streamingText: string,
+): boolean {
+  const comparableStreamingText = normalizeComparableMessageText(streamingText)
+  if (!comparableStreamingText) return true
+
+  return historyMessages.some((message) => (
+    message.type === 'assistant_text' &&
+    normalizeComparableMessageText(message.content).includes(comparableStreamingText)
+  ))
+}
+
+function shouldRecoverRuntimeFromHistory(
+  session: PerSessionState,
+  uiMessages: UIMessage[],
+): boolean {
+  const localUserTurnCount = getUserTurnComparableContents(session.messages).length
+  if (localUserTurnCount === 0) return false
+  if (!historyCoversLocalUserTurns(session.messages, uiMessages)) return false
+  if (!hasAssistantCompletionForUserTurn(uiMessages, localUserTurnCount - 1)) return false
+  return historyContainsStreamingText(uiMessages, session.streamingText)
+}
+
+function getHistorySnapshotApplyMode(
+  session: PerSessionState,
+  uiMessages: UIMessage[],
+): HistorySnapshotApplyMode | null {
+  if (uiMessages.length === 0) return session.messages.length === 0
+    ? 'replace'
+    : null
+  if (session.messages.length === 0) return 'replace'
+  if (
+    session.chatState !== 'idle' ||
+    session.streamingText.trim().length > 0 ||
+    session.streamingToolInput.trim().length > 0 ||
+    session.activeToolUseId ||
+    session.activeThinkingId ||
+    session.pendingPermission ||
+    session.pendingComputerUsePermission
+  ) {
+    return shouldRecoverRuntimeFromHistory(session, uiMessages) ? 'recover' : null
+  }
+
+  return messageHistorySignature(session.messages) !== messageHistorySignature(uiMessages)
+    ? 'replace'
+    : null
+}
+
 function normalizeNotificationPreview(content: string): string {
   return content
     .replace(/```[\s\S]*?```/g, ' code block ')
@@ -272,7 +393,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     void useCLITaskStore.getState().fetchSessionTasks(sessionId)
 
     const existing = get().sessions[sessionId]
-    if (existing && existing.connectionState !== 'disconnected') return
+    if (existing && existing.connectionState !== 'disconnected') {
+      void get().loadHistory(sessionId)
+      return
+    }
 
     set((s) => ({
       sessions: {
@@ -513,14 +637,38 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         lastTodos,
         hasMessagesAfterTaskCompletion,
       } = await fetchAndMapSessionHistory(sessionId)
+      let recoveredFromHistory = false
       set((state) => {
         const session = state.sessions[sessionId]
-        if (!session || session.messages.length > 0) return state
+        if (!session) return state
+        const applyMode = getHistorySnapshotApplyMode(session, uiMessages)
+        if (!applyMode) return state
+        if (applyMode === 'recover') {
+          recoveredFromHistory = true
+          clearPendingDelta(sessionId)
+          clearPendingTaskToolUseIds(sessionId)
+          if (session.elapsedTimer) clearInterval(session.elapsedTimer)
+        }
         return { sessions: updateSessionIn(state.sessions, sessionId, (s) => ({
           messages: uiMessages,
           agentTaskNotifications: { ...s.agentTaskNotifications, ...restoredNotifications },
+          ...(applyMode === 'recover' ? {
+            chatState: 'idle',
+            streamingText: '',
+            streamingToolInput: '',
+            activeToolUseId: null,
+            activeToolName: null,
+            activeThinkingId: null,
+            pendingPermission: null,
+            pendingComputerUsePermission: null,
+            elapsedTimer: null,
+            statusVerb: '',
+          } : {}),
         })) }
       })
+      if (recoveredFromHistory) {
+        useTabStore.getState().updateTabStatus(sessionId, 'idle')
+      }
       if (lastTodos && lastTodos.length > 0) {
         const taskStore = useCLITaskStore.getState()
         if (taskStore.sessionId === sessionId && taskStore.tasks.length === 0) taskStore.setTasksFromTodos(lastTodos, sessionId)
@@ -591,6 +739,35 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }))
   },
 
+  discardLocalTurn: (sessionId, targetUserMessageId) => {
+    clearPendingDelta(sessionId)
+    clearPendingTaskToolUseIds(sessionId)
+    set((state) => {
+      const session = state.sessions[sessionId]
+      if (!session) return state
+      const targetIndex = session.messages.findIndex(
+        (message) => message.type === 'user_text' && message.id === targetUserMessageId,
+      )
+      if (targetIndex < 0) return state
+      if (session.elapsedTimer) clearInterval(session.elapsedTimer)
+      return {
+        sessions: updateSessionIn(state.sessions, sessionId, () => ({
+          messages: session.messages.slice(0, targetIndex),
+          chatState: 'idle',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          elapsedTimer: null,
+          statusVerb: '',
+        })),
+      }
+    })
+  },
+
   clearMessages: (sessionId) => {
     clearPendingTaskToolUseIds(sessionId)
     set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({ messages: [], streamingText: '', chatState: 'idle' })) }))
@@ -603,6 +780,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     switch (msg.type) {
       case 'connected':
+        void get().loadHistory(sessionId)
         break
 
       case 'status':

@@ -179,6 +179,25 @@ export function getLatestCompletedTurnTarget(messages: UIMessage[]): RewindTurnT
   return completedTurns.length > 0 ? completedTurns[completedTurns.length - 1] ?? null : null
 }
 
+export function getLatestUserTurnTarget(messages: UIMessage[]): RewindTurnTarget | null {
+  let userMessageIndex = -1
+  let latestTarget: RewindTurnTarget | null = null
+
+  for (const message of messages) {
+    if (message.type !== 'user_text' || message.pending) continue
+    userMessageIndex += 1
+    latestTarget = {
+      messageId: message.id,
+      userMessageIndex,
+      content: message.content,
+      expectedContent: message.modelContent ?? message.content,
+      attachments: message.attachments,
+    }
+  }
+
+  return latestTarget
+}
+
 function buildTurnCardInsertionMap(
   renderItems: RenderItem[],
   turnChangeCards: TurnChangeCardModel[],
@@ -226,6 +245,17 @@ function getApiErrorMessage(error: unknown) {
       : String(error)
 }
 
+function isLocalOnlyRewindMiss(error: unknown) {
+  if (!(error instanceof ApiError)) return false
+  const message = getApiErrorMessage(error)
+  return (
+    error.status === 404 ||
+    message.includes('This session has no user messages to rewind') ||
+    message.includes('Invalid rewind target') ||
+    message.includes('Message not found in active session chain')
+  )
+}
+
 function isSessionTurnCheckpoint(value: unknown): value is SessionTurnCheckpoint {
   if (!value || typeof value !== 'object') return false
   const checkpoint = value as Partial<SessionTurnCheckpoint>
@@ -269,6 +299,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const reloadHistory = useChatStore((s) => s.reloadHistory)
   const queueComposerPrefill = useChatStore((s) => s.queueComposerPrefill)
+  const discardLocalTurn = useChatStore((s) => s.discardLocalTurn)
   const isMemberSession = useTeamStore((s) =>
     resolvedSessionId ? Boolean(s.getMemberBySessionId(resolvedSessionId)) : false,
   )
@@ -320,6 +351,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     [messages],
   )
   const completedTurnTargets = useMemo(() => getCompletedTurnTargets(messages), [messages])
+  const latestUserTurnTarget = useMemo(() => getLatestUserTurnTarget(messages), [messages])
   const latestCompletedTurnId =
     completedTurnTargets.length > 0
       ? completedTurnTargets[completedTurnTargets.length - 1]?.messageId ?? null
@@ -328,11 +360,6 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     () => buildTurnCardInsertionMap(renderItems, turnChangeCards),
     [renderItems, turnChangeCards],
   )
-  const completedTurnTargetByMessageId = useMemo(
-    () => new Map(completedTurnTargets.map((target) => [target.messageId, target] as const)),
-    [completedTurnTargets],
-  )
-
   useEffect(() => {
     if (!resolvedSessionId || completedTurnTargets.length === 0 || isMemberSession) {
       setTurnChangeCards([])
@@ -440,6 +467,20 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
       setRewindConfirmRequest(null)
     } catch (error) {
       const message = getApiErrorMessage(error)
+      if (rewindConfirmRequest.source === 'message' && isLocalOnlyRewindMiss(error)) {
+        discardLocalTurn(resolvedSessionId, target.messageId)
+        queueComposerPrefill(resolvedSessionId, {
+          text: target.content,
+          attachments: target.attachments,
+        })
+        addToast({
+          type: 'success',
+          message: t('chat.recallLocalOnlySuccess'),
+        })
+        setRewindConfirmRequest(null)
+        return
+      }
+
       setTurnActionErrors((current) => ({
         ...current,
         [target.messageId]: message,
@@ -455,6 +496,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   }, [
     addToast,
     chatState,
+    discardLocalTurn,
     queueComposerPrefill,
     reloadHistory,
     resolvedSessionId,
@@ -520,13 +562,13 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
                   }
                 />
               ) : (() => {
-                const userTurnTarget = item.message.type === 'user_text'
-                  ? completedTurnTargetByMessageId.get(item.message.id) ?? null
-                  : null
+                const userTurnTarget =
+                  item.message.type === 'user_text' &&
+                  latestUserTurnTarget?.messageId === item.message.id
+                    ? latestUserTurnTarget
+                    : null
                 const canRecallUserTurn =
                   Boolean(userTurnTarget) &&
-                  userTurnTarget?.messageId === latestCompletedTurnId &&
-                  chatState === 'idle' &&
                   !isMemberSession
 
                 return (

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MessageList, buildRenderModel } from './MessageList'
 import { relativizeWorkspacePath } from './CurrentTurnChangeCard'
+import { ApiError } from '../../api/client'
 import { sessionsApi } from '../../api/sessions'
 import { useChatStore } from '../../stores/chatStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -898,6 +899,67 @@ describe('MessageList nested tool calls', () => {
       text: '',
       attachments,
     })
+  })
+
+  it('recalls unsaved in-flight user turns locally when the server has no rewind target', async () => {
+    vi.spyOn(sessionsApi, 'rewind').mockRejectedValue(
+      new ApiError(404, { message: 'This session has no user messages to rewind.' }),
+    )
+    const reloadHistory = vi.fn().mockResolvedValue(undefined)
+    const queueComposerPrefill = vi.fn()
+    const discardLocalTurn = vi.fn()
+    const stopGeneration = vi.fn()
+    const attachments = [{
+      type: 'file' as const,
+      name: 'App.tsx',
+      path: 'src/App.tsx',
+      lineStart: 3,
+      lineEnd: 5,
+    }]
+
+    useChatStore.setState({
+      reloadHistory,
+      queueComposerPrefill,
+      discardLocalTurn,
+      stopGeneration,
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'thinking',
+          messages: [
+            {
+              id: 'user-local',
+              type: 'user_text',
+              content: 'Update the unsaved turn',
+              attachments,
+              timestamp: 1,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Recall to edit' }))
+    fireEvent.click(
+      within(await screen.findByRole('dialog', { name: 'Recall latest message?' }))
+        .getByRole('button', { name: 'Recall to edit' }),
+    )
+
+    await waitFor(() => {
+      expect(sessionsApi.rewind).toHaveBeenCalledWith(ACTIVE_TAB, {
+        targetUserMessageId: 'user-local',
+        userMessageIndex: 0,
+        expectedContent: 'Update the unsaved turn',
+      })
+    })
+    expect(stopGeneration).toHaveBeenCalledWith(ACTIVE_TAB)
+    expect(discardLocalTurn).toHaveBeenCalledWith(ACTIVE_TAB, 'user-local')
+    expect(queueComposerPrefill).toHaveBeenCalledWith(ACTIVE_TAB, {
+      text: 'Update the unsaved turn',
+      attachments,
+    })
+    expect(reloadHistory).not.toHaveBeenCalled()
   })
 
   it('surfaces recall failures when the server rejects the rewind', async () => {

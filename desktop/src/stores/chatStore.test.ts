@@ -615,6 +615,196 @@ describe('chatStore history mapping', () => {
     expect(markCompletedAndDismissedMock).toHaveBeenCalledWith(TEST_SESSION_ID)
   })
 
+  it('refreshes idle session history when an existing in-memory transcript is stale', async () => {
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'user-new',
+          type: 'user',
+          timestamp: '2026-04-06T00:00:00.000Z',
+          content: 'new prompt',
+        },
+        {
+          id: 'assistant-new',
+          type: 'assistant',
+          timestamp: '2026-04-06T00:00:01.000Z',
+          content: 'new reply',
+        },
+      ],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          messages: [
+            { id: 'assistant-old', type: 'assistant_text', content: 'old reply', timestamp: 1 },
+          ],
+        }),
+      },
+    })
+
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      { id: 'user-new', type: 'user_text', content: 'new prompt' },
+      { id: 'assistant-new', type: 'assistant_text', content: 'new reply' },
+    ])
+  })
+
+  it('does not overwrite an active optimistic turn when transcript history has not caught up', async () => {
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'user-old',
+          type: 'user',
+          timestamp: '2026-04-06T00:00:00.000Z',
+          content: 'old prompt',
+        },
+        {
+          id: 'assistant-old',
+          type: 'assistant',
+          timestamp: '2026-04-06T00:00:01.000Z',
+          content: 'old reply',
+        },
+      ],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'thinking',
+          messages: [
+            { id: 'user-old-local', type: 'user_text', content: 'old prompt', timestamp: 1 },
+            { id: 'assistant-old-local', type: 'assistant_text', content: 'old reply', timestamp: 2 },
+            { id: 'user-local', type: 'user_text', content: 'new prompt', timestamp: 3 },
+          ],
+        }),
+      },
+    })
+
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      { id: 'user-old-local', type: 'user_text', content: 'old prompt' },
+      { id: 'assistant-old-local', type: 'assistant_text', content: 'old reply' },
+      { id: 'user-local', type: 'user_text', content: 'new prompt' },
+    ])
+  })
+
+  it('recovers a stale active session from transcript history after output was missed', async () => {
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'user-old',
+          type: 'user',
+          timestamp: '2026-04-06T00:00:00.000Z',
+          content: 'old prompt',
+        },
+        {
+          id: 'assistant-old',
+          type: 'assistant',
+          timestamp: '2026-04-06T00:00:01.000Z',
+          content: 'old reply',
+        },
+        {
+          id: 'user-new',
+          type: 'user',
+          timestamp: '2026-04-06T00:00:02.000Z',
+          content: 'new prompt',
+        },
+        {
+          id: 'assistant-new',
+          type: 'assistant',
+          timestamp: '2026-04-06T00:00:03.000Z',
+          content: 'partial answer completed',
+        },
+      ],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'streaming',
+          streamingText: 'partial answer',
+          statusVerb: 'Working',
+          messages: [
+            { id: 'user-old-local', type: 'user_text', content: 'old prompt', timestamp: 1 },
+            { id: 'assistant-old-local', type: 'assistant_text', content: 'old reply', timestamp: 2 },
+            { id: 'user-local', type: 'user_text', content: 'new prompt', timestamp: 3 },
+          ],
+        }),
+      },
+    })
+
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.messages).toMatchObject([
+      { id: 'user-old', type: 'user_text', content: 'old prompt' },
+      { id: 'assistant-old', type: 'assistant_text', content: 'old reply' },
+      { id: 'user-new', type: 'user_text', content: 'new prompt' },
+      { id: 'assistant-new', type: 'assistant_text', content: 'partial answer completed' },
+    ])
+    expect(session).toMatchObject({
+      chatState: 'idle',
+      streamingText: '',
+      streamingToolInput: '',
+      activeToolUseId: null,
+      activeToolName: null,
+      activeThinkingId: null,
+      pendingPermission: null,
+      pendingComputerUsePermission: null,
+      statusVerb: '',
+    })
+    expect(updateTabStatusMock).toHaveBeenCalledWith(TEST_SESSION_ID, 'idle')
+  })
+
+  it('discards a local turn and clears transient runtime state', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'tool_executing',
+          streamingText: 'partial',
+          streamingToolInput: '{"cmd"',
+          activeToolUseId: 'tool-2',
+          activeToolName: 'Bash',
+          activeThinkingId: 'thinking-2',
+          pendingPermission: {
+            requestId: 'perm-1',
+            toolName: 'Bash',
+            input: { command: 'npm test' },
+          },
+          statusVerb: 'Working',
+          messages: [
+            { id: 'user-1', type: 'user_text', content: 'first prompt', timestamp: 1 },
+            { id: 'assistant-1', type: 'assistant_text', content: 'first reply', timestamp: 2 },
+            { id: 'user-2', type: 'user_text', content: 'second prompt', timestamp: 3 },
+            { id: 'tool-2-message', type: 'tool_use', toolName: 'Bash', toolUseId: 'tool-2', input: {}, timestamp: 4 },
+          ],
+        }),
+      },
+    })
+
+    useChatStore.getState().discardLocalTurn(TEST_SESSION_ID, 'user-2')
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]).toMatchObject({
+      messages: [
+        { id: 'user-1', type: 'user_text', content: 'first prompt' },
+        { id: 'assistant-1', type: 'assistant_text', content: 'first reply' },
+      ],
+      chatState: 'idle',
+      streamingText: '',
+      streamingToolInput: '',
+      activeToolUseId: null,
+      activeToolName: null,
+      activeThinkingId: null,
+      pendingPermission: null,
+      pendingComputerUsePermission: null,
+      statusVerb: '',
+    })
+  })
+
   it('reloads history task state for the requested session', async () => {
     const todos = [{ content: 'Reloaded task', status: 'pending' }]
     vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
