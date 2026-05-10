@@ -197,6 +197,65 @@ describe('WebSocket handler session isolation', () => {
     }))
   })
 
+  it('schedules automatic retry when an API error arrives before the final result', async () => {
+    const sessionId = `retry-assistant-api-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let outputCallback: ((msg: any) => void) | null = null
+    spyOn(conversationService, 'hasSession').mockImplementation(() => true)
+    spyOn(conversationService, 'clearOutputCallbacks').mockImplementation(() => {})
+    spyOn(conversationService, 'onOutput').mockImplementation((_sessionId, callback) => {
+      outputCallback = callback
+    })
+    spyOn(conversationService, 'sendMessage').mockImplementation(() => true)
+
+    handleWebSocket.open(ws)
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'search the web',
+    }))
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    outputCallback?.({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      error: 'API_ERROR',
+      message: {
+        content: [{ type: 'text', text: 'Upstream returned HTTP 400' }],
+      },
+    })
+
+    let messages = ws.sent.map((payload) => JSON.parse(payload))
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: 'Upstream returned HTTP 400',
+      code: 'API_ERROR',
+    }))
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: 'system_notification',
+      subtype: 'retry_scheduled',
+      data: expect.objectContaining({
+        failureCount: 1,
+        errorCode: 'API_ERROR',
+        errorMessage: 'Upstream returned HTTP 400',
+        source: 'user',
+        synthetic: false,
+      }),
+    }))
+
+    outputCallback?.({
+      type: 'result',
+      is_error: true,
+      result: 'Upstream returned HTTP 400',
+      usage: { input_tokens: 1, output_tokens: 0 },
+    })
+
+    messages = ws.sent.map((payload) => JSON.parse(payload))
+    const retrySchedules = messages.filter(
+      (message) => message.type === 'system_notification' && message.subtype === 'retry_scheduled',
+    )
+    expect(retrySchedules).toHaveLength(1)
+  })
+
   it('pauses a scheduled automatic retry when generation is stopped', async () => {
     const sessionId = `retry-stop-${crypto.randomUUID()}`
     const ws = makeClientSocket(sessionId)
@@ -235,6 +294,78 @@ describe('WebSocket handler session isolation', () => {
         errorMessage: 'API Error: timeout',
       }),
     }))
+  })
+
+  it('schedules automatic retry for failed goal continuations and replays them as synthetic turns', async () => {
+    await useTempConfigDir()
+    const sessionId = `retry-goal-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const fakeSession = { outputCallbacks: [] as Array<(msg: any) => void> }
+    const sessions = (conversationService as unknown as {
+      sessions: Map<string, typeof fakeSession>
+    }).sessions
+    sessions.set(sessionId, fakeSession)
+    const sendToCli = spyOn(conversationService, 'sendMessage').mockImplementation(() => true)
+    const sendSynthetic = spyOn(conversationService, 'sendSyntheticMessage')
+      .mockImplementation(() => true)
+
+    try {
+      handleWebSocket.open(ws)
+      handleWebSocket.message(ws, JSON.stringify({
+        type: 'user_message',
+        content: '/goal finish local tests',
+      }))
+      await new Promise(resolve => setTimeout(resolve, 80))
+
+      expect(sendSynthetic).toHaveBeenCalledWith(
+        sessionId,
+        expect.stringContaining('finish local tests'),
+        { priority: 'next' },
+      )
+      expect(sendToCli).not.toHaveBeenCalled()
+      expect(fakeSession.outputCallbacks.length).toBeGreaterThan(0)
+
+      fakeSession.outputCallbacks.at(-1)?.({
+        type: 'result',
+        is_error: true,
+        result: 'Failed to authenticate. API Error: 401 quota threshold',
+        usage: { input_tokens: 1, output_tokens: 0 },
+      })
+      await new Promise(resolve => setTimeout(resolve, 10))
+
+      let messages = ws.sent.map((payload) => JSON.parse(payload))
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'system_notification',
+        subtype: 'retry_scheduled',
+        data: expect.objectContaining({
+          failureCount: 1,
+          errorCode: 'CLI_ERROR',
+          errorMessage: 'Failed to authenticate. API Error: 401 quota threshold',
+          source: 'goal',
+          synthetic: true,
+        }),
+      }))
+
+      handleWebSocket.message(ws, JSON.stringify({
+        type: 'user_message',
+        content: '/retry now',
+      }))
+      await new Promise(resolve => setTimeout(resolve, 10))
+
+      messages = ws.sent.map((payload) => JSON.parse(payload))
+      expect(messages).toContainEqual(expect.objectContaining({
+        type: 'system_notification',
+        subtype: 'retry_attempting',
+        data: expect.objectContaining({
+          source: 'goal',
+          synthetic: true,
+        }),
+      }))
+      expect(sendSynthetic).toHaveBeenCalledTimes(2)
+      expect(sendToCli).not.toHaveBeenCalled()
+    } finally {
+      sessions.delete(sessionId)
+    }
   })
 
   it('handles /goal pause locally and persists the paused goal', async () => {

@@ -56,9 +56,16 @@ const goalCompletionNotifiedIds = new Set<string>()
 const DEFAULT_MODEL_RETRY_INTERVAL_MS = 120_000
 
 type UserMessagePayload = Extract<ClientMessage, { type: 'user_message' }>
-type FailedTurnRetryState = {
+type ReplayableTurnPriority = 'now' | 'next' | 'later'
+type ReplayableTurnSource = 'user' | 'goal' | 'synthetic'
+type ReplayableTurnPayload = {
   content: string
   attachments?: UserMessagePayload['attachments']
+  synthetic?: boolean
+  priority?: ReplayableTurnPriority
+  source: ReplayableTurnSource
+}
+type FailedTurnRetryState = ReplayableTurnPayload & {
   failureCount: number
   lastErrorMessage: string
   lastErrorCode: string
@@ -67,7 +74,7 @@ type FailedTurnRetryState = {
   paused: boolean
 }
 
-const activeUserTurns = new Map<string, Pick<UserMessagePayload, 'content' | 'attachments'>>()
+const activeRetryTurns = new Map<string, ReplayableTurnPayload>()
 const failedTurnRetries = new Map<string, FailedTurnRetryState>()
 
 /**
@@ -905,14 +912,42 @@ function getModelRetryIntervalMs(): number {
     : DEFAULT_MODEL_RETRY_INTERVAL_MS
 }
 
+function rememberActiveRetryTurn(
+  sessionId: string,
+  payload: ReplayableTurnPayload,
+) {
+  activeRetryTurns.set(sessionId, {
+    content: payload.content,
+    attachments: cloneAttachments(payload.attachments),
+    synthetic: payload.synthetic,
+    priority: payload.priority,
+    source: payload.source,
+  })
+}
+
 function rememberActiveUserTurn(
   sessionId: string,
   message: Pick<UserMessagePayload, 'content' | 'attachments'>,
 ) {
-  activeUserTurns.set(sessionId, {
+  rememberActiveRetryTurn(sessionId, {
     content: message.content,
-    attachments: cloneAttachments(message.attachments),
+    attachments: message.attachments,
+    source: 'user',
   })
+}
+
+function rememberActiveGoalContinuationTurn(
+  sessionId: string,
+  goal: SessionGoal,
+): string {
+  const prompt = buildGoalContinuationPrompt(goal)
+  rememberActiveRetryTurn(sessionId, {
+    content: prompt,
+    synthetic: true,
+    priority: 'next',
+    source: 'goal',
+  })
+  return prompt
 }
 
 function cloneAttachments(
@@ -931,7 +966,7 @@ function clearFailedTurnRetryState(sessionId: string) {
   const state = failedTurnRetries.get(sessionId)
   if (state) clearFailedTurnRetryTimer(state)
   failedTurnRetries.delete(sessionId)
-  activeUserTurns.delete(sessionId)
+  activeRetryTurns.delete(sessionId)
 }
 
 function buildFailedTurnRetryData(state: FailedTurnRetryState) {
@@ -943,6 +978,8 @@ function buildFailedTurnRetryData(state: FailedTurnRetryState) {
     nextRetryAt: state.nextRetryAt,
     errorMessage: state.lastErrorMessage,
     errorCode: state.lastErrorCode,
+    source: state.source,
+    synthetic: !!state.synthetic,
   }
 }
 
@@ -980,9 +1017,9 @@ function recordFailedTurnForRetry(
   ws: ServerWebSocket<WebSocketData>,
   sessionId: string,
   error: { message: string; code: string },
-) {
-  const activeTurn = activeUserTurns.get(sessionId)
-  if (!activeTurn) return
+): boolean {
+  const activeTurn = activeRetryTurns.get(sessionId)
+  if (!activeTurn) return false
 
   const previous = failedTurnRetries.get(sessionId)
   if (previous) clearFailedTurnRetryTimer(previous)
@@ -990,6 +1027,9 @@ function recordFailedTurnForRetry(
   const state: FailedTurnRetryState = {
     content: activeTurn.content,
     attachments: cloneAttachments(activeTurn.attachments),
+    synthetic: activeTurn.synthetic,
+    priority: activeTurn.priority,
+    source: activeTurn.source,
     failureCount: (previous?.failureCount ?? 0) + 1,
     lastErrorMessage: error.message,
     lastErrorCode: error.code,
@@ -999,6 +1039,7 @@ function recordFailedTurnForRetry(
   }
   failedTurnRetries.set(sessionId, state)
   scheduleFailedTurnRetryTimer(ws, sessionId, state)
+  return true
 }
 
 function scheduleFailedTurnRetryTimer(
@@ -1060,14 +1101,44 @@ function extractCliResultRetryError(
     (Array.isArray(cliMsg.errors) && cliMsg.errors.length > 0
       ? cliMsg.errors.join('\n')
       : 'Unknown error')
-  const lastApiError = getStreamState(sessionId).lastApiError
+  const streamState = getStreamState(sessionId)
+  const lastApiError = streamState.lastApiError
   if (lastApiError && isDuplicateOfLastApiError(lastApiError, resultMessage)) {
+    if (streamState.lastApiErrorRetryRecorded) return null
     return lastApiError
   }
   return {
     message: resultMessage,
     code: 'CLI_ERROR',
   }
+}
+
+function extractAssistantRetryError(cliMsg: any): { message: string; code: string } | null {
+  if (cliMsg?.type !== 'assistant' || (!cliMsg.error && !cliMsg.isApiErrorMessage)) {
+    return null
+  }
+
+  return {
+    message: extractAssistantText(cliMsg) || cliMsg.error || 'Unknown API error',
+    code: typeof cliMsg.error === 'string' ? cliMsg.error : 'API_ERROR',
+  }
+}
+
+function sendReplayableTurn(
+  sessionId: string,
+  payload: ReplayableTurnPayload,
+): boolean {
+  if (payload.synthetic) {
+    return conversationService.sendSyntheticMessage(sessionId, payload.content, {
+      priority: payload.priority ?? 'next',
+    })
+  }
+
+  return conversationService.sendMessage(
+    sessionId,
+    payload.content,
+    cloneAttachments(payload.attachments),
+  )
 }
 
 async function startFailedTurnRetryAttempt(sessionId: string) {
@@ -1081,10 +1152,7 @@ async function startFailedTurnRetryAttempt(sessionId: string) {
   }
 
   sessionStopRequested.delete(sessionId)
-  rememberActiveUserTurn(sessionId, {
-    content: state.content,
-    attachments: state.attachments,
-  })
+  rememberActiveRetryTurn(sessionId, state)
 
   sendRetrySystemNotification(ws, sessionId, {
     subtype: 'retry_attempting',
@@ -1107,11 +1175,7 @@ async function startFailedTurnRetryAttempt(sessionId: string) {
     await ensureCliSessionStarted(ws, sessionId, 'user_message')
     rebindSessionOutput(sessionId, ws)
 
-    const sent = conversationService.sendMessage(
-      sessionId,
-      state.content,
-      cloneAttachments(state.attachments),
-    )
+    const sent = sendReplayableTurn(sessionId, state)
     if (!sent) {
       sendMessage(ws, {
         type: 'error',
@@ -1224,7 +1288,30 @@ async function handleCliResultGoalSideEffects(
   }
 }
 
-function handleCliResultRetrySideEffects(
+async function rememberActiveGoalRetryTurnIfAvailable(sessionId: string): Promise<boolean> {
+  if (activeRetryTurns.has(sessionId)) return true
+
+  const goal = await goalService.getGoal(sessionId).catch(() => null)
+  if (goal?.status !== 'active') return false
+
+  rememberActiveGoalContinuationTurn(sessionId, goal)
+  return true
+}
+
+function recordRetryErrorForActiveTurn(
+  ws: ServerWebSocket<WebSocketData>,
+  sessionId: string,
+  error: { message: string; code: string },
+): boolean | Promise<boolean> {
+  if (activeRetryTurns.has(sessionId)) {
+    return recordFailedTurnForRetry(ws, sessionId, error)
+  }
+
+  return rememberActiveGoalRetryTurnIfAvailable(sessionId)
+    .then(() => recordFailedTurnForRetry(ws, sessionId, error))
+}
+
+async function handleCliResultRetrySideEffects(
   ws: ServerWebSocket<WebSocketData>,
   sessionId: string,
   cliMsg: any,
@@ -1234,7 +1321,7 @@ function handleCliResultRetrySideEffects(
   },
 ) {
   if (options.wasStopRequested) {
-    activeUserTurns.delete(sessionId)
+    activeRetryTurns.delete(sessionId)
     const state = failedTurnRetries.get(sessionId)
     if (state && !state.paused) {
       pauseFailedTurnRetry(ws, sessionId, 'manual_stop')
@@ -1243,8 +1330,10 @@ function handleCliResultRetrySideEffects(
   }
 
   if (cliMsg.is_error) {
+    if (getStreamState(sessionId).lastApiErrorRetryRecorded) return
     if (options.retryError) {
-      recordFailedTurnForRetry(ws, sessionId, options.retryError)
+      const recorded = recordRetryErrorForActiveTurn(ws, sessionId, options.retryError)
+      if (recorded instanceof Promise) await recorded
     }
     return
   }
@@ -1296,29 +1385,74 @@ async function startGoalContinuationTurn(
 ) {
   if (activeSessions.get(sessionId) !== ws) return
 
-  clearPrewarmState(sessionId)
-  const runtimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
-  if (!runtimeTransition.ok) return
-
-  await ensureCliSessionStarted(ws, sessionId, 'user_message')
-  rebindSessionOutput(sessionId, ws)
-
   const goal = await goalService.getGoal(sessionId)
   if (goal?.status !== 'active') return
 
-  sendGoalSystemNotification(ws, goal, {
+  let prompt = rememberActiveGoalContinuationTurn(sessionId, goal)
+  clearPrewarmState(sessionId)
+  const runtimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
+  if (!runtimeTransition.ok) {
+    recordFailedTurnForRetry(ws, sessionId, {
+      message: runtimeTransition.errorMessage ?? 'Failed to switch provider/model before continuing goal.',
+      code: runtimeTransition.errorCode ?? 'CLI_RESTART_FAILED',
+    })
+    return
+  }
+
+  try {
+    await ensureCliSessionStarted(ws, sessionId, 'user_message')
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err)
+    const code =
+      err instanceof ConversationStartupError ? err.code : 'CLI_START_FAILED'
+    const diagnosticMessage = await buildSessionStartupDiagnosticMessage(sessionId, errMsg)
+    console.error(`[WS] CLI start failed while continuing goal for ${sessionId}: ${errMsg}`)
+    sendMessage(ws, {
+      type: 'error',
+      message: diagnosticMessage,
+      code,
+      retryable:
+        err instanceof ConversationStartupError ? err.retryable : false,
+    })
+    sendMessage(ws, { type: 'status', state: 'idle' })
+    recordFailedTurnForRetry(ws, sessionId, {
+      message: diagnosticMessage,
+      code,
+    })
+    return
+  }
+  rebindSessionOutput(sessionId, ws)
+
+  const currentGoal = await goalService.getGoal(sessionId)
+  if (currentGoal?.status !== 'active') {
+    activeRetryTurns.delete(sessionId)
+    return
+  }
+  prompt = rememberActiveGoalContinuationTurn(sessionId, currentGoal)
+
+  sendGoalSystemNotification(ws, currentGoal, {
     subtype: 'goal_continuing',
-    message: `Continuing session goal: ${goal.objective}`,
+    message: `Continuing session goal: ${currentGoal.objective}`,
   })
   sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Continuing goal' })
 
   const sent = conversationService.sendSyntheticMessage(
     sessionId,
-    buildGoalContinuationPrompt(goal),
+    prompt,
     { priority: 'next' },
   )
   if (!sent) {
-    throw new Error('CLI process is not running. The session may have ended or the process crashed.')
+    const message = 'CLI process is not running. The session may have ended or the process crashed.'
+    sendMessage(ws, {
+      type: 'error',
+      message,
+      code: 'CLI_NOT_RUNNING',
+    })
+    sendMessage(ws, { type: 'status', state: 'idle' })
+    recordFailedTurnForRetry(ws, sessionId, {
+      message,
+      code: 'CLI_NOT_RUNNING',
+    })
   }
 }
 
@@ -1462,6 +1596,7 @@ type SessionStreamState = {
     message: string
     code: string
   }
+  lastApiErrorRetryRecorded?: boolean
 }
 
 const sessionStreamStates = new Map<string, SessionStreamState>()
@@ -1475,6 +1610,7 @@ function getStreamState(sessionId: string): SessionStreamState {
       activeToolBlocks: new Map(),
       pendingToolBlocks: new Map(),
       lastApiError: undefined,
+      lastApiErrorRetryRecorded: false,
     }
     sessionStreamStates.set(sessionId, state)
   }
@@ -1661,6 +1797,7 @@ function translateCliMessage(cliMsg: any, sessionId: string): ServerMessage[] {
         const message = extractAssistantText(cliMsg) || cliMsg.error || 'Unknown API error'
         const code = typeof cliMsg.error === 'string' ? cliMsg.error : 'API_ERROR'
         streamState.lastApiError = { message, code }
+        streamState.lastApiErrorRetryRecorded = false
         return [{
           type: 'error',
           message,
@@ -1909,6 +2046,7 @@ function translateCliMessage(cliMsg: any, sessionId: string): ServerMessage[] {
             : 'Unknown error')
         if (isDuplicateOfLastApiError(streamState.lastApiError, resultMessage)) {
           streamState.lastApiError = undefined
+          streamState.lastApiErrorRetryRecorded = false
           return [{ type: 'message_complete', usage }]
         }
         // 错误和完成消息都发送
@@ -1925,6 +2063,7 @@ function translateCliMessage(cliMsg: any, sessionId: string): ServerMessage[] {
       // Clear stop flag on successful completion too
       sessionStopRequested.delete(sessionId)
       streamState.lastApiError = undefined
+      streamState.lastApiErrorRetryRecorded = false
       return [{ type: 'message_complete', usage }]
     }
 
@@ -2103,14 +2242,27 @@ function rebindSessionOutput(
       cliMsg.type === 'result'
         ? extractCliResultRetryError(cliMsg, sessionId)
         : null
+    const assistantRetryError = extractAssistantRetryError(cliMsg)
     const serverMsgs = translateCliMessage(cliMsg, sessionId)
     for (const msg of serverMsgs) {
       sendMessage(ws, msg)
     }
 
+    if (assistantRetryError) {
+      const streamState = getStreamState(sessionId)
+      const recorded = recordRetryErrorForActiveTurn(ws, sessionId, assistantRetryError)
+      if (recorded instanceof Promise) {
+        void recorded.then((didRecord) => {
+          if (didRecord) streamState.lastApiErrorRetryRecorded = true
+        })
+      } else if (recorded) {
+        streamState.lastApiErrorRetryRecorded = true
+      }
+    }
+
     if (cliMsg.type === 'result') {
       triggerTitleGeneration(ws, sessionId)
-      handleCliResultRetrySideEffects(ws, sessionId, cliMsg, {
+      void handleCliResultRetrySideEffects(ws, sessionId, cliMsg, {
         wasStopRequested,
         retryError,
       })
@@ -2377,6 +2529,6 @@ export function __resetWebSocketHandlerStateForTests(): void {
   prewarmIdleTimers.clear()
   goalContinuationTimers.clear()
   goalCompletionNotifiedIds.clear()
-  activeUserTurns.clear()
+  activeRetryTurns.clear()
   failedTurnRetries.clear()
 }
